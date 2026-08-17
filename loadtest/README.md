@@ -34,5 +34,10 @@ The script defaults to:
 - 1024 bytes per player every second
 - 2 minute connect ramp
 
-Do not use a real user's token. After the test, revoke or delete the temporary
-token from the relay database/admin API.
+Do not use a real user's token. There is no relay database or admin API —
+the relay is accountless and stateless (see the main README's "Compatibility
+& trust model" section). A "temporary token" is just any `vp_`-shaped string
+you make up for the test; there's nothing to revoke or delete afterward. Its
+only persistent trace is the relay's in-memory sticky-port mapping, which is
+forgotten automatically once the token has been disconnected for longer than
+the sticky-port TTL (see relay.go's `stickyPortTTL`).

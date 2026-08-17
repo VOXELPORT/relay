@@ -21,5 +21,21 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 
+# Additional hardening. All of these were smoke-tested against a real build
+# of this binary on the actual deployment target (systemctl status clean,
+# TCP listener bound, /api/status reachable) before being enabled here — see
+# the "Manual production tests" section of the audit report this came from.
+# The relay is CGO_ENABLED=0 pure Go (see go.mod) with no device/kernel/
+# cgroup/namespace access of any kind, so none of these remove anything it
+# actually needs.
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictNamespaces=true
+MemoryDenyWriteExecute=true
+
 [Install]
 WantedBy=multi-user.target

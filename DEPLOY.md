@@ -64,9 +64,13 @@ Then start a host (mod or desktop app) — it should print a
 
 ## Notes
 
-- **No Discord, no accounts, no database.** Hosts authenticate with an
-  auto-generated `vp_…` device token created on first run; the relay accepts any
-  well-formed token and rate-limits to one active tunnel per token.
+- **No Discord, no accounts, no database.** Hosts identify with an
+  auto-generated `vp_…` device token created on first run — an anonymous
+  bearer identity, not conventional account authentication. See README.md's
+  "Authentication model" for exactly what this does and doesn't guarantee.
 - `play.voxelport.in` and `relay.voxelport.in` should both resolve to this VPS.
   Players join `play.voxelport.in:<assigned-port>`; hosts connect to
   `wss://relay.voxelport.in`.
+- The service stops via `systemctl stop` (SIGTERM) cleanly and quickly — it
+  drains active tunnels itself before exiting, no forced kill needed under
+  normal conditions.
