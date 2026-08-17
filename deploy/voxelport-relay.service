@@ -1,0 +1,25 @@
+[Unit]
+Description=VoxelPort Relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=voxelport
+Group=voxelport
+WorkingDirectory=/opt/voxelport
+ExecStart=/opt/voxelport/voxelport-relay -listen 127.0.0.1:2526 -min-port 25500 -max-port 25999
+Restart=on-failure
+RestartSec=3
+
+# Allow binding the public Minecraft port range without running as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+# Hardening
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

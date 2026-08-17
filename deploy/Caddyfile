@@ -1,0 +1,20 @@
+# VoxelPort relay — deployed to relay.voxelport.in.
+# Caddy terminates TLS for the mod/app's wss:// control connection and proxies to
+# the relay's local WebSocket + status listener. Caddy fetches/renews the
+# Let's Encrypt certificate automatically.
+#
+# DNS: relay.voxelport.in A record must point at the relay VPS IP.
+# The player-facing TCP port range (25500-25999) is NOT proxied here — vanilla
+# players connect to those ports directly, so open them in the VPS firewall.
+# play.voxelport.in should resolve to the same IP (players join play.voxelport.in:<port>).
+
+relay.voxelport.in {
+	reverse_proxy 127.0.0.1:2526 {
+		transport http {
+			read_timeout  0
+			write_timeout 0
+			dial_timeout  10s
+		}
+		flush_interval -1
+	}
+}

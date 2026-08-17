@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VoxelPort Relay</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,sans-serif;background:#0a0f0d;color:#d7e5df;min-height:100vh;padding:2.5rem 1.5rem}
+.wrap{max-width:640px;margin:0 auto}
+h1{font-size:1.3rem;color:#fff;letter-spacing:-.01em}
+.brand{color:#00ffb2}
+.status{display:flex;align-items:center;gap:.55rem;margin:.6rem 0 2rem;font-size:.85rem;color:#7d8f88}
+.dot{width:9px;height:9px;border-radius:50%;background:#3a463f}
+.dot.on{background:#00ffb2;box-shadow:0 0 10px #00ffb2}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin-bottom:1.6rem}
+.card{background:#101815;border:1px solid #1c2823;border-radius:12px;padding:1.2rem 1.3rem}
+.card .n{font-size:2rem;font-weight:650;color:#fff}
+.card .l{font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;color:#6f8177;margin-top:.2rem}
+table{width:100%;border-collapse:collapse;font-size:.9rem}
+th{text-align:left;font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;color:#6f8177;padding:.5rem .4rem;border-bottom:1px solid #1c2823}
+td{padding:.55rem .4rem;border-bottom:1px solid #151f1b}
+.note{color:#6f8177;font-size:.82rem;line-height:1.5;margin-top:.4rem}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1><span class="brand">VoxelPort</span> Relay</h1>
+  <div class="status"><span class="dot" id="dot"></span><span id="statusText">connecting…</span></div>
+  <div class="grid">
+    <div class="card"><div class="n" id="tunnels">–</div><div class="l">Active tunnels</div></div>
+    <div class="card"><div class="n" id="players">–</div><div class="l">Players online</div></div>
+    <div class="card"><div class="n" id="data">–</div><div class="l">Data relayed</div></div>
+  </div>
+  <p class="note">Individual server addresses are private. Hosts get their own address in-game via the VoxelPort mod or app.</p>
+</div>
+<script>
+function fmtBytes(n){
+  if(!n) return '0B';
+  const u=['B','KB','MB','GB','TB','PB']; let i=0;
+  while(n>=1024 && i<u.length-1){ n/=1024; i++; }
+  return (i===0?n:n.toFixed(1))+u[i];
+}
+async function refresh(){
+  try{
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    document.getElementById('dot').classList.add('on');
+    document.getElementById('statusText').textContent = 'online';
+    document.getElementById('tunnels').textContent = d.tunnels ?? 0;
+    document.getElementById('players').textContent = d.players ?? 0;
+    const totals = d.totals || {bytes_in:0,bytes_out:0};
+    document.getElementById('data').textContent = fmtBytes((totals.bytes_in||0)+(totals.bytes_out||0));
+  }catch(e){
+    document.getElementById('dot').classList.remove('on');
+    document.getElementById('statusText').textContent = 'offline';
+  }
+}
+refresh(); setInterval(refresh, 3000);
+</script>
+</body>
+</html>

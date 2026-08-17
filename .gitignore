@@ -1,0 +1,25 @@
+# SECRETS / STATE — never commit
+*.db
+*.db-wal
+*.db-shm
+*.env
+.env
+config.local.*
+
+# Build output
+/voxelport-relay
+/voxelport-relay.exe
+/voxelport-relay-linux-amd64
+/dist/
+home-deploy/voxelport-relay
+home-deploy/voxelport-relay.exe
+loadtest/loadgen/loadgen
+loadtest/loadgen/loadgen.exe
+loadtest/loadgen/loadgen-linux-arm64
+loadtest/loadgen/*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
