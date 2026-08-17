@@ -1028,6 +1028,46 @@ func TestClientIPTrustsForwardedHeaderFromLoopback(t *testing.T) {
 	}
 }
 
+func TestClientIPTrustsRealIPHeaderFromLoopback(t *testing.T) {
+	r := newRelay(testConfig())
+	req := &http.Request{
+		RemoteAddr: "127.0.0.1:1234", // nginx, on the same host, per the trazverse deployment
+		Header:     make(http.Header),
+	}
+	req.Header.Set("X-Real-IP", "198.51.100.9") // Set canonicalizes the key, matching real parsed requests
+	got := r.clientIP(req)
+	if got != "198.51.100.9" {
+		t.Fatalf("expected the X-Real-IP address from a trusted (loopback) peer, got %q", got)
+	}
+}
+
+func TestClientIPPrefersForwardedForOverRealIP(t *testing.T) {
+	r := newRelay(testConfig())
+	req := &http.Request{
+		RemoteAddr: "127.0.0.1:1234",
+		Header:     make(http.Header),
+	}
+	req.Header.Set("X-Forwarded-For", "198.51.100.9")
+	req.Header.Set("X-Real-IP", "198.51.100.99")
+	got := r.clientIP(req)
+	if got != "198.51.100.9" {
+		t.Fatalf("expected X-Forwarded-For to take precedence, got %q", got)
+	}
+}
+
+func TestClientIPIgnoresRealIPHeaderFromUntrustedPeer(t *testing.T) {
+	r := newRelay(testConfig())
+	req := &http.Request{
+		RemoteAddr: "203.0.113.7:1234",
+		Header:     make(http.Header),
+	}
+	req.Header.Set("X-Real-IP", "9.9.9.9")
+	got := r.clientIP(req)
+	if got != "203.0.113.7" {
+		t.Fatalf("expected the direct peer address when the peer isn't trusted, got %q", got)
+	}
+}
+
 func TestClientIPFallsBackToRemoteAddrWithNoForwardedHeader(t *testing.T) {
 	r := newRelay(testConfig())
 	req := &http.Request{RemoteAddr: "203.0.113.7:1234"}

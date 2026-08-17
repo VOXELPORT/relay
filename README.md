@@ -87,7 +87,7 @@ GOOS=linux GOARCH=amd64 go build -o voxelport-relay .
 | `-token-secret` | (unset) | shared-prefix gate — see "Token gate" above |
 | `-max-tunnels-per-ip` | 5 | max simultaneous active tunnels from one source IP |
 | `-max-players-per-ip` | 16 | max simultaneous player connections from one source IP, per tunnel |
-| `-trusted-proxy-cidrs` | (unset) | CIDRs allowed to supply `X-Forwarded-For`; loopback is always trusted |
+| `-trusted-proxy-cidrs` | (unset) | CIDRs allowed to supply `X-Forwarded-For`/`X-Real-IP`; loopback is always trusted |
 
 Sends `SIGTERM`/`SIGINT` for graceful shutdown: stops accepting new
 connections, closes every active tunnel (control WebSocket, all player
@@ -122,9 +122,11 @@ of these require a mod/app update — see "Compatibility" below.
 | Sticky-port memory | 1 hour after disconnect | bounds memory used remembering "give this token its old port back" |
 | Connection ID | 128 bits (`crypto/rand`) | not guessable/spoofable |
 
-`X-Forwarded-For` is only trusted from loopback (the documented Caddy
-deployment) or `-trusted-proxy-cidrs` — a directly exposed relay can't have
-its rate limits bypassed by a client spoofing that header.
+`X-Forwarded-For` and `X-Real-IP` are only trusted from loopback (the
+documented Caddy/nginx-on-the-same-host deployments — different reverse
+proxies default to different headers, so both are honored) or
+`-trusted-proxy-cidrs` — a directly exposed relay can't have its rate
+limits bypassed by a client spoofing either header.
 
 ## Wire protocol
 
