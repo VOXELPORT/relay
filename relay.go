@@ -500,22 +500,32 @@ func isTrustedProxy(remoteIP string, trusted []*net.IPNet) bool {
 }
 
 // clientIP extracts the real client address for rate limiting and per-IP
-// tunnel/player limits. X-Forwarded-For is only honoured when the direct
-// peer is a trusted proxy (see isTrustedProxy) — otherwise a directly
-// exposed relay could trivially be spoofed by a client supplying its own
-// X-Forwarded-For header.
+// tunnel/player limits. X-Forwarded-For / X-Real-IP are only honoured when
+// the direct peer is a trusted proxy (see isTrustedProxy) — otherwise a
+// directly exposed relay could trivially be spoofed by a client supplying
+// its own header. Both headers are checked because different reverse
+// proxies default to different ones (e.g. nginx's proxy_set_header
+// X-Real-IP vs. Caddy's automatic X-Forwarded-For) — accepting either from
+// a trusted peer costs nothing since both are equally spoofable/trustable
+// depending on the same isTrustedProxy check.
 func (r *relay) clientIP(req *http.Request) string {
 	host, _, err := net.SplitHostPort(req.RemoteAddr)
 	if err != nil {
 		host = req.RemoteAddr
 	}
-	if fwd := req.Header.Get("X-Forwarded-For"); fwd != "" && isTrustedProxy(host, r.trustedProxies) {
+	if !isTrustedProxy(host, r.trustedProxies) {
+		return host
+	}
+	if fwd := req.Header.Get("X-Forwarded-For"); fwd != "" {
 		if i := strings.IndexByte(fwd, ','); i >= 0 {
 			fwd = fwd[:i]
 		}
 		if trimmed := strings.TrimSpace(fwd); trimmed != "" {
 			return trimmed
 		}
+	}
+	if real := strings.TrimSpace(req.Header.Get("X-Real-IP")); real != "" {
+		return real
 	}
 	return host
 }
