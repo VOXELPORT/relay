@@ -1,9 +1,9 @@
 # VoxelPort Relay
 
-The server-side counterpart to the VoxelPort mod and desktop app. It:
+The server-side counterpart to the VoxelPort desktop app. It:
 
-1. Accepts secure WebSocket (`wss://`) connections from a host (the Fabric mod or
-   the desktop app).
+1. Accepts secure WebSocket (`wss://`) connections from a host (the desktop app, or
+   older releases of the discontinued Fabric mod).
 2. Identifies the host by its auto-generated device token (`vp_…`) — see
    "Authentication model" below for exactly what this does and does not provide.
 3. Assigns each host a public TCP port (sticky per token while the relay is up).
@@ -24,7 +24,7 @@ This README covers build/run/protocol/limits.
 ## Authentication model
 
 VoxelPort uses anonymous bearer device tokens as tunnel identities. Tokens
-are generated locally on the mod/app and are not tied to an account — the
+are generated locally by the app and are not tied to an account — the
 official relay accepts any well-formed token (`vp_[A-Za-z0-9_-]{10,}`).
 **Knowledge of a token is sufficient to reconnect as that tunnel identity, so
 a token should be treated as a secret**, the same way you'd treat a password.
@@ -45,11 +45,10 @@ Read this carefully before relying on it:
 - It is a **shared-prefix convenience gate**, not per-user authentication. It
   stops a stranger who merely *finds the relay's URL* from opening a tunnel
   through it — nothing more.
-- It does **not** work with the stock mod/app out of the box: their tokens
+- It does **not** work with the stock app out of the box: their tokens
   are generated locally with no prefix convention. To use this gate, you
   (the relay operator) must also configure every host you expect to connect
-  — e.g. via the mod's `/voxel token <token>` command or `VOXELPORT_TOKEN`
-  env var, or the app's token field — to use a token starting with your
+  — e.g. via the app's token field — to use a token starting with your
   chosen secret.
 - Because VoxelPort is open source, a secret compiled into or configured
   alongside a client is not secret from someone reading the source or the
@@ -106,7 +105,7 @@ forced exit, so a supervisor (systemd, Docker) can always stop it cleanly.
 
 The relay enforces a set of fixed and configurable limits to keep the
 intentionally accountless `/ws` endpoint from being trivially abused. None
-of these require a mod/app update — see "Compatibility" below.
+of these require an app update — see "Compatibility" below.
 
 | Limit | Value | Purpose |
 |---|---|---|
@@ -130,7 +129,7 @@ limits bypassed by a client spoofing either header.
 
 ## Wire protocol
 
-JSON text frames (matches the mod's `ServerRelayService` and the app's tunnel client):
+JSON text frames (matches the app's tunnel client):
 
 | Direction      | Frame |
 |----------------|-------|
@@ -151,7 +150,7 @@ TCP only (Java Edition). Bedrock/UDP is out of scope.
 
 Every fix and limit added to this relay preserves this wire protocol exactly
 — same frame types, same fields, same JSON shapes. **Existing published
-mod/app versions work unchanged against this relay**, with no update
+app versions (and the discontinued mod) work unchanged against this relay**, with no update
 required. The only externally-observable differences: connection IDs are
 now 32 hex characters instead of 16 (clients only ever echo these back as
 opaque strings, so length was never assumed), and abusive/stuck
