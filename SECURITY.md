@@ -23,7 +23,7 @@ rather than a feature, that's intentional.
   IP, players per tunnel and per IP, message size, idle timeouts).
 - **Token confidentiality in transit**, when the deployment is configured
   correctly for TLS (see "What TLS protects" below) — the default relay URL
-  the mod/app use is `wss://`.
+  the app uses is `wss://`.
 
 ### What this does NOT protect against
 
@@ -158,6 +158,6 @@ Report vulnerabilities privately to: **security@voxelport.in** (placeholder —
 configure a real, monitored address or enable GitHub's private security
 advisories for this repository before relying on this contact).
 
-Please include: the affected component (relay/mod/app), reproduction steps,
+Please include: the affected component (relay/app), reproduction steps,
 and the realistic impact you believe it has. We'll acknowledge receipt and
 aim to have a fix or mitigation plan before any public disclosure.

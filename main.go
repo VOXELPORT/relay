@@ -2,14 +2,17 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	_ "embed"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -33,9 +36,15 @@ func main() {
 	maxTunnelsPerIP := flag.Int("max-tunnels-per-ip", 5, "maximum simultaneous active tunnels from one source IP")
 	maxPlayersPerIP := flag.Int("max-players-per-ip", 16, "maximum simultaneous player connections from one source IP, per tunnel")
 	trustedProxyCIDRs := flag.String("trusted-proxy-cidrs", "", "comma-separated CIDRs allowed to supply X-Forwarded-For (loopback is always trusted; production Caddy runs on the same host)")
+	directListen := flag.String("direct-listen", "", "optional second listener serving wss:// directly (e.g. :26499), bypassing any CDN/tunnel in front of -listen")
+	directCert := flag.String("direct-tls-cert", "", "TLS certificate (PEM) for -direct-listen; reloaded from disk when it changes")
+	directKey := flag.String("direct-tls-key", "", "TLS key (PEM) for -direct-listen")
 	flag.Parse()
 
 	if err := validateConfig(*minPort, *maxPort, *maxTunnelsPerIP, *maxPlayersPerIP); err != nil {
+		log.Fatalf("invalid configuration: %v", err)
+	}
+	if err := validateDirectListener(*directListen, *directCert, *directKey, *minPort, *maxPort); err != nil {
 		log.Fatalf("invalid configuration: %v", err)
 	}
 	trustedProxies, err := parseTrustedProxies(*trustedProxyCIDRs)
@@ -74,7 +83,33 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	serveErr := make(chan error, 1)
+	serveErr := make(chan error, 2)
+
+	// Optional direct wss:// listener. Same handlers as the main one, but its
+	// own TLS — so hosts can skip a CDN/tunnel hop that may route them far
+	// away (e.g. Cloudflare sending Indian ISPs via Singapore).
+	var directSrv *http.Server
+	if *directListen != "" {
+		rc, err := newReloadingCert(*directCert, *directKey)
+		if err != nil {
+			log.Fatalf("direct listener: %v", err)
+		}
+		directSrv = &http.Server{
+			Addr:              *directListen,
+			Handler:           mux,
+			ReadHeaderTimeout: 10 * time.Second,
+			MaxHeaderBytes:    1 << 20,
+			TLSConfig: &tls.Config{
+				MinVersion:     tls.VersionTLS12,
+				GetCertificate: rc.GetCertificate,
+			},
+		}
+		go func() {
+			log.Printf("VoxelPort relay direct wss:// listener on %s", *directListen)
+			serveErr <- directSrv.ListenAndServeTLS("", "")
+		}()
+	}
+
 	go func() {
 		log.Printf("VoxelPort relay listening on %s, ports %d-%d (max %d tunnels/IP, %d players/IP/tunnel)",
 			*listen, *minPort, *maxPort, *maxTunnelsPerIP, *maxPlayersPerIP)
@@ -101,12 +136,42 @@ func main() {
 
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
+		if directSrv != nil {
+			go directSrv.Shutdown(shutdownCtx)
+		}
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("forced shutdown after %s: %v", shutdownTimeout, err)
 		} else {
 			log.Printf("shutdown complete")
 		}
 	}
+}
+
+// validateDirectListener checks the optional direct listener flags: cert and
+// key are required with it, and its port must not overlap the tunnel range
+// (the relay would otherwise race itself for that port).
+func validateDirectListener(addr, cert, key string, minPort, maxPort int) error {
+	if addr == "" {
+		if cert != "" || key != "" {
+			return errors.New("-direct-tls-cert/-direct-tls-key require -direct-listen")
+		}
+		return nil
+	}
+	if cert == "" || key == "" {
+		return errors.New("-direct-listen requires -direct-tls-cert and -direct-tls-key")
+	}
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("-direct-listen: %w", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return errors.New("-direct-listen port must be between 1 and 65535")
+	}
+	if port >= minPort && port <= maxPort {
+		return fmt.Errorf("-direct-listen port %d overlaps the tunnel port range %d-%d", port, minPort, maxPort)
+	}
+	return nil
 }
 
 // validateConfig rejects startup configuration that could panic, loop
