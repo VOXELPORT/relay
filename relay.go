@@ -22,12 +22,16 @@ import (
 
 // Msg is the single wire envelope exchanged with a host client (mod or app).
 //
-// Client -> relay:  register{token, blocked_ips[]}, data{conn, data}, close{conn}, ping
-// Relay  -> client: port{port} | error{message}, connect{conn, ip}, data{conn, data}, close{conn}, pong
+// Client -> relay: register{token, blocked_ips[], udp}, data{conn, data}, close{conn}, ping,
+// udp{conn, data}, udp_close{conn}, claim_name{name}, release_name, listing{listing?}.
 //
-// None of the fixes in this file change this envelope — every field, type,
-// and frame type is unchanged, so existing mod/app clients keep working
-// without any update. See README.md's "Compatibility" note.
+// Relay -> client: port{port} | error{message}, connect{conn, ip}, data{conn, data}, close{conn}, pong,
+// udp{conn, ip?, data}, udp_close{conn}, udp_error{message}, name{name, address},
+// name_error{message}, listing_error{message}.
+//
+// The udp, name and listing frames are additive: an older client never
+// sends udp/claim_name/listing and never receives udp, name or listing frames
+// unless it asked, so existing mod/app versions keep working unchanged.
 type Msg struct {
 	Type       string   `json:"type"`
 	Token      string   `json:"token,omitempty"`
@@ -37,6 +41,10 @@ type Msg struct {
 	IP         string   `json:"ip,omitempty"`
 	Data       string   `json:"data,omitempty"`
 	Message    string   `json:"message,omitempty"`
+	UDP        bool     `json:"udp,omitempty"`
+	Name       string   `json:"name,omitempty"`
+	Address    string   `json:"address,omitempty"`
+	Listing    *Listing `json:"listing,omitempty"`
 }
 
 // tokenPattern accepts the auto-generated device tokens produced by the mod/app.
@@ -188,6 +196,9 @@ type client struct {
 	blocked   map[string]bool
 	closeOnce sync.Once
 
+	udp     *udpState // non-nil when the host asked for Bedrock (UDP) forwarding
+	listing *Listing  // public server-list entry, nil unless the host opted in (guarded by mu)
+
 	// Usage metering — the foundation for per-token limits / billing.
 	startedAt   time.Time    // when this tunnel registered (read-only)
 	bytesIn     atomic.Int64 // player -> host (uploaded through the relay)
@@ -249,6 +260,13 @@ type relay struct {
 	trustedProxies []*net.IPNet
 
 	regLimiter *regLimiter
+
+	// names holds permanent custom addresses (nil = feature disabled);
+	// publicHost is the hostname players use with a port (play.voxelport.in);
+	// hidden lists server-list entries an operator has taken down.
+	names      *nameStore
+	publicHost string
+	hidden     *hiddenList
 }
 
 // stickyPortInfo remembers which port a token last used, and when, so a
@@ -274,6 +292,10 @@ type relayConfig struct {
 	MaxTunnelsPerIP       int
 	MaxPlayersPerIPTunnel int
 	TrustedProxies        []*net.IPNet
+
+	Names      *nameStore
+	PublicHost string
+	Hidden     *hiddenList
 
 	// Zero means "use the production default" — only tests need to set these.
 	InitialPlayerTimeout time.Duration
@@ -303,6 +325,12 @@ func newRelay(cfg relayConfig) *relay {
 		initialPlayerTimeout:  initialTimeout,
 		idlePlayerTimeout:     idleTimeout,
 		regLimiter:            newRegLimiter(),
+		names:                 cfg.Names,
+		publicHost:            cfg.PublicHost,
+		hidden:                cfg.Hidden,
+	}
+	if r.publicHost == "" {
+		r.publicHost = "localhost"
 	}
 	go r.sweepLoop()
 	return r
@@ -350,6 +378,13 @@ func newID() (string, error) {
 // Callers must already hold r.regSerialize.
 func (r *relay) reservePort(clientID string) (net.Listener, int, error) {
 	tryBind := func(port int) (net.Listener, bool) {
+		// A port behind someone else's custom address stays theirs even while
+		// they're offline, or their DNS record would point at a stranger.
+		if r.names != nil {
+			if owner := r.names.portOwner(port); owner != "" && owner != clientID {
+				return nil, false
+			}
+		}
 		r.mu.Lock()
 		if r.usedPort[port] {
 			r.mu.Unlock()
@@ -368,10 +403,16 @@ func (r *relay) reservePort(clientID string) (net.Listener, int, error) {
 		return ln, true
 	}
 
-	// Prefer the sticky port so a reconnecting host keeps its address.
+	// Prefer the port behind this host's custom address, then the sticky
+	// port, so a reconnecting host keeps its address.
 	r.mu.Lock()
 	sticky := r.portByID[clientID].port
 	r.mu.Unlock()
+	if r.names != nil {
+		if e, ok := r.names.forClient(clientID); ok {
+			sticky = e.Port
+		}
+	}
 	if sticky != 0 {
 		if ln, ok := tryBind(sticky); ok {
 			return ln, sticky, nil
@@ -637,6 +678,12 @@ func (r *relay) handleWS(w http.ResponseWriter, req *http.Request) {
 	for _, blockedIP := range reg.BlockedIPs {
 		c.blocked[blockedIP] = true
 	}
+	// Bound before the tunnel is published, so an eviction can never race
+	// with c.udp being set.
+	var udpErr error
+	if reg.UDP {
+		udpErr = c.startUDP()
+	}
 
 	r.mu.Lock()
 	r.clients[clientID] = c
@@ -648,6 +695,22 @@ func (r *relay) handleWS(w http.ResponseWriter, req *http.Request) {
 
 	c.send(Msg{Type: "port", Port: port})
 	log.Printf("[relay] tunnel up: token %s… -> public port %d", clientID[:8], port)
+
+	if udpErr != nil {
+		log.Printf("[udp] port %d: %v", port, udpErr)
+		c.send(Msg{Type: "udp_error", Message: "Bedrock (UDP) forwarding is unavailable right now."})
+	}
+	if r.names != nil {
+		if e, ok := r.names.forClient(clientID); ok {
+			if e.Port != port {
+				// Its reserved port was somehow busy; move the DNS record to
+				// the port the host actually got.
+				go r.names.repoint(clientID, port)
+			}
+			r.names.touch(clientID)
+			c.send(Msg{Type: "name", Name: e.Name, Address: r.names.address(e.Name)})
+		}
+	}
 
 	go r.acceptPlayers(c)
 
@@ -713,6 +776,56 @@ func (r *relay) handleClientMsg(c *client, m Msg) {
 
 	case "ping":
 		c.send(Msg{Type: "pong"})
+
+	case "udp":
+		c.handleHostUDP(m)
+
+	case "udp_close":
+		c.closeUDPSession(m.Conn, false)
+
+	case "claim_name":
+		if r.names == nil {
+			c.send(Msg{Type: "name_error", Message: "Custom addresses aren't available on this relay."})
+			return
+		}
+		name, port := m.Name, c.publicPort
+		// DNS calls take a moment — never block this tunnel's data path on them.
+		go func() {
+			e, err := r.names.claim(c.id, name, port)
+			if err != nil {
+				c.send(Msg{Type: "name_error", Message: err.Error()})
+				return
+			}
+			c.send(Msg{Type: "name", Name: e.Name, Address: r.names.address(e.Name)})
+		}()
+
+	case "release_name":
+		if r.names == nil {
+			return
+		}
+		go func() {
+			if err := r.names.release(c.id); err != nil {
+				c.send(Msg{Type: "name_error", Message: err.Error()})
+				return
+			}
+			c.send(Msg{Type: "name"})
+		}()
+
+	case "listing":
+		if m.Listing == nil {
+			c.mu.Lock()
+			c.listing = nil
+			c.mu.Unlock()
+			return
+		}
+		l, err := sanitizeListing(*m.Listing)
+		if err != nil {
+			c.send(Msg{Type: "listing_error", Message: err.Error()})
+			return
+		}
+		c.mu.Lock()
+		c.listing = &l
+		c.mu.Unlock()
 	}
 }
 
@@ -819,6 +932,9 @@ func (c *client) close(r *relay) {
 		for _, pc := range players {
 			pc.close()
 		}
+		if c.udp != nil {
+			c.udp.close()
+		}
 		c.ws.Close()
 		r.releasePort(c.publicPort)
 		r.removeTunnel(c.sourceIP)
@@ -832,9 +948,9 @@ func sendErr(ws *websocket.Conn, message string) {
 }
 
 // apiStatus exposes only aggregate, non-identifying relay metrics. It deliberately
-// does NOT return a per-tunnel list: publishing each tunnel's public port turned the
-// panel into a public directory of every live server, letting anyone connect to
-// other people's games. A host sees its own address in-game via the mod/app.
+// does NOT return a per-tunnel list: publishing every tunnel's public port would
+// turn it into a directory of everyone's games. Only hosts that explicitly opt in
+// appear publicly, via /api/servers (see listing.go).
 func (r *relay) apiStatus(w http.ResponseWriter, req *http.Request) {
 	r.mu.Lock()
 	var totalPlayers int

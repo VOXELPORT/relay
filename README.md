@@ -133,7 +133,7 @@ JSON text frames (matches the app's tunnel client):
 
 | Direction      | Frame |
 |----------------|-------|
-| host → relay   | `{"type":"register","token":"vp_…","blocked_ips":[...]}` |
+| host → relay   | `{"type":"register","token":"vp_…","blocked_ips":[...],"udp":true?}` |
 | host → relay   | `{"type":"ping"}` |
 | host → relay   | `{"type":"data","conn":id,"data":base64}` |
 | host → relay   | `{"type":"close","conn":id}` |
@@ -144,7 +144,53 @@ JSON text frames (matches the app's tunnel client):
 | relay → host   | `{"type":"pong"}` |
 | relay → host   | `{"type":"error","message":"..."}` |
 
-TCP only (Java Edition). Bedrock/UDP is out of scope.
+### Bedrock (UDP)
+
+A host that registers with `"udp":true` also gets UDP forwarded on the same
+public port. Each remote address is a session:
+
+| Direction      | Frame |
+|----------------|-------|
+| relay → host   | `{"type":"udp","conn":id,"ip":"1.2.3.4","data":base64}` (`ip` only on a session's first datagram) |
+| host → relay   | `{"type":"udp","conn":id,"data":base64}` |
+| either way     | `{"type":"udp_close","conn":id}` |
+| relay → host   | `{"type":"udp_error","message":"..."}` (UDP couldn't be opened; TCP still works) |
+
+Limits: 256 sessions per tunnel, 8 per source IP, 2048-byte datagrams, 60 s
+idle timeout. Until a session has sent 4 datagrams, the host may send it at
+most 4× the bytes it received plus 600 — so a spoofed source address can't
+turn the relay into an amplifier, while a real RakNet ping/pong still fits.
+
+### Custom addresses
+
+| Direction      | Frame |
+|----------------|-------|
+| host → relay   | `{"type":"claim_name","name":"steve"}` / `{"type":"release_name"}` |
+| relay → host   | `{"type":"name","name":"steve","address":"steve.voxelport.in"}` (empty after release; also sent right after `port` on every connection) |
+| relay → host   | `{"type":"name_error","message":"..."}` |
+
+A claimed name creates `_minecraft._tcp.<name>` (SRV → `-public-host`:port,
+which Java clients follow) and `<name>` (CNAME → `-public-host`) in the
+Cloudflare zone `-dns-zone`, using `$CF_DNS_API_TOKEN` (Zone:Read + DNS:Edit).
+The name permanently reserves its port for that token — even while offline —
+until it's released or unused for 60 days. Names are 3–20 of `a-z0-9-`;
+infrastructure names and offensive words are refused, existing DNS records are
+never overwritten, and claims are rate-limited. State lives in
+`<-data-dir>/names.json`; without `-data-dir` and the token, the feature is off.
+
+### Public server list
+
+| Direction      | Frame |
+|----------------|-------|
+| host → relay   | `{"type":"listing","listing":{"title","description","version","mode","players","max_players","bedrock"}}` |
+| host → relay   | `{"type":"listing"}` (withdraw) |
+| relay → host   | `{"type":"listing_error","message":"..."}` |
+
+Opted-in, live tunnels appear at `GET /api/servers` (CORS-open, cached 15 s).
+Nothing is persisted. Text is cleaned (control characters and § codes
+stripped, lengths capped) and offensive words refused. Operators can hide an
+entry without a restart by adding its custom name, or the first 8+ hex
+characters of its token ID from the logs, to `<-data-dir>/hidden.txt`.
 
 ## Compatibility
 
