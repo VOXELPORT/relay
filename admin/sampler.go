@@ -75,11 +75,17 @@ type sample struct {
 	RelayOut float64 `json:"rout"`
 	Players  float64 `json:"players"`
 	Tunnels  float64 `json:"tunnels"`
+	TempC    float64 `json:"temp"`
+	Load1    float64 `json:"load"`
+	DiskUsed float64 `json:"disk"` // bytes used on /
+	WebLive  float64 `json:"web"`  // website visitors active in the last 5 minutes
 }
 
 type sampler struct {
 	iface string
 	up    *upstreams
+	st    *store
+	tr    *tracker
 
 	mu        sync.Mutex
 	short     []sample
@@ -97,11 +103,16 @@ type sampler struct {
 	prevAt    time.Time
 }
 
-func newSampler(iface string, up *upstreams) *sampler {
+func newSampler(iface string, up *upstreams, st *store) *sampler {
 	if iface == "" {
 		iface = busiestIface()
 	}
-	return &sampler{iface: iface, up: up}
+	s := &sampler{iface: iface, up: up, st: st, tr: newTracker(st)}
+	// Pick up where we left off: the charts survive a restart.
+	now := time.Now()
+	s.short = st.raw5s(now.Add(-time.Hour), now)
+	s.long = st.minutes(now.Add(-24*time.Hour), now)
+	return s
 }
 
 func (s *sampler) run() {
@@ -119,6 +130,8 @@ func (s *sampler) tick() {
 	rx, tx := readNet(s.iface)
 	memTotal, memAvail := readMem()
 	services := serviceStates("voxelport-relay", "voxelport-web", "voxelport-admin", "cloudflared", "tailscaled", "wings", "docker")
+
+	s.tr.observe(relay, relayErr, webErr, services)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -150,13 +163,6 @@ func (s *sampler) tick() {
 	s.prevRelay = [2]float64{rIn, rOut}
 	s.prevAt = now
 
-	s.short = appendCapped(s.short, pt, shortLen)
-	s.pending = append(s.pending, pt)
-	if len(s.pending) >= int(time.Minute/sampleEvery) {
-		s.long = appendCapped(s.long, average(s.pending), longLen)
-		s.pending = s.pending[:0]
-	}
-
 	var disk syscall.Statfs_t
 	diskTotal, diskFree := uint64(0), uint64(0)
 	if syscall.Statfs("/", &disk) == nil {
@@ -164,6 +170,24 @@ func (s *sampler) tick() {
 		diskFree = disk.Bavail * uint64(disk.Bsize)
 	}
 	load := readLoad()
+	temp := readTemp()
+	pt.TempC, pt.DiskUsed = temp, float64(diskTotal-diskFree)
+	if len(load) > 0 {
+		pt.Load1 = load[0]
+	}
+	if web != nil {
+		pt.WebLive, _ = web["live"].(float64)
+	}
+
+	s.short = appendCapped(s.short, pt, shortLen)
+	s.st.addRaw(pt)
+	s.pending = append(s.pending, pt)
+	if len(s.pending) >= int(time.Minute/sampleEvery) {
+		m := average(s.pending)
+		s.long = appendCapped(s.long, m, longLen)
+		s.st.addMinute(m)
+		s.pending = s.pending[:0]
+	}
 	s.latest = map[string]any{
 		"cpu":          pt.CPU,
 		"cores":        numCPU(),
@@ -173,7 +197,7 @@ func (s *sampler) tick() {
 		"disk_total":   diskTotal,
 		"disk_free":    diskFree,
 		"uptime":       readUptime(),
-		"temp_c":       readTemp(),
+		"temp_c":       temp,
 		"iface":        s.iface,
 		"net_rx":       pt.NetRx,
 		"net_tx":       pt.NetTx,
@@ -218,22 +242,45 @@ func average(ps []sample) sample {
 		a.RelayOut += p.RelayOut
 		a.Players += p.Players
 		a.Tunnels += p.Tunnels
+		a.TempC += p.TempC
+		a.Load1 += p.Load1
+		a.DiskUsed += p.DiskUsed
+		a.WebLive += p.WebLive
 	}
 	n := float64(len(ps))
 	return sample{T: ps[len(ps)-1].T, CPU: a.CPU / n, MemUsed: a.MemUsed / n, NetRx: a.NetRx / n, NetTx: a.NetTx / n,
-		RelayIn: a.RelayIn / n, RelayOut: a.RelayOut / n, Players: a.Players / n, Tunnels: a.Tunnels / n}
+		RelayIn: a.RelayIn / n, RelayOut: a.RelayOut / n, Players: a.Players / n, Tunnels: a.Tunnels / n,
+		TempC: a.TempC / n, Load1: a.Load1 / n, DiskUsed: a.DiskUsed / n, WebLive: a.WebLive / n}
 }
 
+// history returns chart points for a range: the last hour and day come from
+// memory, longer ranges from the saved minute / hourly files.
 func (s *sampler) history(rng string) map[string]any {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	pts := s.short
-	step := int(sampleEvery / time.Second)
-	if rng == "24h" {
-		pts = s.long
-		step = 60
+	now := time.Now()
+	var pts []sample
+	switch rng {
+	case "24h":
+		s.mu.Lock()
+		pts = append([]sample(nil), s.long...)
+		s.mu.Unlock()
+	case "7d":
+		pts = downsample(s.st.minutes(now.AddDate(0, 0, -7), now), 1000)
+	case "30d":
+		pts = downsample(s.st.hourly(now.AddDate(0, 0, -30), now), 1000)
+	case "1y":
+		pts = downsample(s.st.hourly(now.AddDate(-1, 0, 0), now), 1000)
+	case "all":
+		pts = downsample(s.st.hourly(time.Unix(0, 0), now), 1000)
+	default:
+		rng = "1h"
+		s.mu.Lock()
+		pts = append([]sample(nil), s.short...)
+		s.mu.Unlock()
 	}
-	return map[string]any{"range": rng, "step_s": step, "points": append([]sample(nil), pts...)}
+	if pts == nil {
+		pts = []sample{}
+	}
+	return map[string]any{"range": rng, "points": pts}
 }
 
 func overview(up *upstreams, s *sampler, dl *downloads) map[string]any {

@@ -18,6 +18,7 @@ package main
 
 import (
 	"embed"
+	"encoding/json"
 	"errors"
 	"flag"
 	"io"
@@ -27,6 +28,7 @@ import (
 	"net/http"
 	"os"
 	"time"
+	_ "time/tzdata" // -tz works even without the system zoneinfo
 )
 
 //go:embed web
@@ -39,6 +41,8 @@ func main() {
 	iface := flag.String("iface", "", "network interface to chart (default: the busiest physical one)")
 	repo := flag.String("github-repo", "VOXELPORT/VoxelPort-App", "GitHub repo whose release downloads are counted")
 	storeApp := flag.String("store-app", "9NGRX9CFNBD6", "Microsoft Store app ID")
+	dataDir := flag.String("data-dir", "/var/lib/voxelport-admin", "where every sample, session, event and download count is kept")
+	tz := flag.String("tz", "Asia/Kolkata", "time zone that saved days are cut in")
 	flag.Parse()
 
 	token := os.Getenv("VOXELPORT_ADMIN_TOKEN")
@@ -53,10 +57,18 @@ func main() {
 		log.Fatal(err)
 	}
 
+	loc, err := time.LoadLocation(*tz)
+	if err != nil {
+		log.Fatalf("-tz: %v", err)
+	}
+	st, err := openStore(*dataDir, loc)
+	if err != nil {
+		log.Fatalf("data dir: %v", err)
+	}
 	up := &upstreams{relay: *relayAPI, web: *webAPI, token: token, client: &http.Client{Timeout: 4 * time.Second}}
-	sys := newSampler(*iface, up)
+	sys := newSampler(*iface, up, st)
 	go sys.run()
-	dl := newDownloads(*repo, *storeApp, os.Getenv("STORE_TENANT_ID"), os.Getenv("STORE_CLIENT_ID"), os.Getenv("STORE_CLIENT_SECRET"))
+	dl := newDownloads(st, *repo, *storeApp, os.Getenv("STORE_TENANT_ID"), os.Getenv("STORE_CLIENT_ID"), os.Getenv("STORE_CLIENT_SECRET"))
 	go dl.run()
 
 	auth := newAuth(password)
@@ -88,7 +100,23 @@ func main() {
 			return
 		}
 		code, out := up.action(body)
+		if code == http.StatusOK {
+			var a map[string]any
+			json.Unmarshal(body, &a)
+			st.event("admin_action", map[string]any{"action": a["action"], "id": a["id"], "name": a["name"]})
+		}
 		writeJSON(w, code, out)
+	}), false))
+
+	mux.Handle("GET /api/saved", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"usage":    st.usage(),
+			"sessions": st.tail("sessions.jsonl", 25),
+			"events":   st.tail("events.jsonl", 40),
+		})
+	}), false))
+	mux.Handle("GET /api/export", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		exportData(w, r, st, up)
 	}), false))
 
 	srv := &http.Server{

@@ -28,6 +28,10 @@
         <div class="seg" role="group" aria-label="Chart range">
           <button type="button" data-range="1h" aria-pressed="true">Last hour</button>
           <button type="button" data-range="24h" aria-pressed="false">24 hours</button>
+          <button type="button" data-range="7d" aria-pressed="false">7 days</button>
+          <button type="button" data-range="30d" aria-pressed="false">30 days</button>
+          <button type="button" data-range="1y" aria-pressed="false">1 year</button>
+          <button type="button" data-range="all" aria-pressed="false">All</button>
         </div>
       </div>
       <div class="charts">
@@ -68,6 +72,30 @@
     <section class="block">
       <div class="block-head"><h2>Moderation</h2><span class="muted">Hidden server-list entries and blocked apps</span></div>
       <div class="two-col tight" id="moderation"></div>
+    </section>
+    <section class="block" id="saved">
+      <div class="block-head"><h2>Saved data</h2><span class="muted" id="saved-usage"></span></div>
+      <form class="export" id="export-form">
+        <label for="ex-what">Data</label>
+        <select id="ex-what">
+          <option value="minutes">Live activity, every minute</option>
+          <option value="metrics">Live activity, every 5 seconds (max 31 days)</option>
+          <option value="hourly">Live activity, every hour</option>
+          <option value="sessions">Server sessions</option>
+          <option value="events">Events log</option>
+          <option value="website">Website visits</option>
+          <option value="downloads">Downloads per day</option>
+        </select>
+        <label for="ex-from">From</label><input id="ex-from" type="date">
+        <label for="ex-to">To</label><input id="ex-to" type="date">
+        <label for="ex-format">Format</label>
+        <select id="ex-format"><option value="csv">CSV (Excel, Sheets)</option><option value="json">JSON</option></select>
+        <button class="btn primary" type="submit">Download</button>
+      </form>
+      <div class="two-col">
+        <div><h3 class="sub">Recent server sessions</h3><div class="table-wrap"><table class="table" id="sessions"></table></div></div>
+        <div><h3 class="sub">Events</h3><div class="table-wrap"><table class="table" id="events"></table></div></div>
+      </div>
     </section>
   </main>
 
