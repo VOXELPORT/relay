@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>VoxelPort Admin</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body class="login-page">
+  <form class="login-card" method="post" action="/login">
+    <div class="brand"><span class="brand-mark">VP</span><span>VoxelPort <b>Admin</b></span></div>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+    <p class="login-msg" id="msg"></p>
+    <button type="submit" class="btn primary">Sign in</button>
+    <p class="login-note">Only reachable over your Tailscale network.</p>
+  </form>
+  <script src="/login.js"></script>
+</body>
+</html>

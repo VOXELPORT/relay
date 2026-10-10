@@ -1,0 +1,32 @@
+[Unit]
+Description=VoxelPort Admin dashboard (Tailscale only)
+After=network-online.target tailscaled.service voxelport-relay.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=voxelport
+Group=voxelport
+WorkingDirectory=/opt/voxelport-admin
+# VOXELPORT_ADMIN_TOKEN, VOXELPORT_ADMIN_PASSWORD and the optional STORE_* keys.
+EnvironmentFile=/etc/voxelport/admin.env
+# Listens on the Tailscale address only, so it is never reachable from the
+# internet. It starts before Tailscale has its IP on some boots; systemd retries.
+ExecStart=/opt/voxelport-admin/voxelport-admin -listen 100.89.127.14:2530 -relay http://127.0.0.1:2528 -web http://127.0.0.1:2529
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictNamespaces=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target

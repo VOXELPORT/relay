@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>VoxelPort Admin</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">VP</span><span>VoxelPort <b>Admin</b></span></div>
+    <div class="services" id="services" aria-label="Service health"></div>
+    <div class="topbar-right">
+      <span class="updated" id="updated">Loading…</span>
+      <form method="post" action="/logout"><button class="btn ghost" type="submit">Sign out</button></form>
+    </div>
+  </header>
+
+  <main class="page">
+    <div class="alert" id="alert" hidden></div>
+
+    <section class="kpis" id="kpis" aria-label="Right now"></section>
+
+    <section class="block">
+      <div class="block-head">
+        <h2>Live activity</h2>
+        <div class="seg" role="group" aria-label="Chart range">
+          <button type="button" data-range="1h" aria-pressed="true">Last hour</button>
+          <button type="button" data-range="24h" aria-pressed="false">24 hours</button>
+        </div>
+      </div>
+      <div class="charts">
+        <figure class="chart-card"><figcaption>Players online</figcaption><div class="chart" id="ch-players"></div></figure>
+        <figure class="chart-card"><figcaption>Relay traffic</figcaption><div class="chart" id="ch-relay"></div></figure>
+        <figure class="chart-card"><figcaption>Home internet <span class="muted" id="iface-name"></span></figcaption><div class="chart" id="ch-net"></div></figure>
+        <figure class="chart-card"><figcaption>CPU</figcaption><div class="chart" id="ch-cpu"></div></figure>
+      </div>
+    </section>
+
+    <section class="block">
+      <div class="block-head"><h2>Servers online</h2><span class="muted" id="ports-line"></span></div>
+      <div class="table-wrap"><table class="table" id="tunnels"></table></div>
+    </section>
+
+    <div class="two-col">
+      <section class="block">
+        <div class="block-head"><h2>Website</h2><span class="muted">voxelport.in · page loads, no cookies</span></div>
+        <div id="web"></div>
+      </section>
+      <section class="block">
+        <div class="block-head"><h2>Downloads</h2></div>
+        <div id="downloads"></div>
+      </section>
+    </div>
+
+    <div class="two-col">
+      <section class="block">
+        <div class="block-head"><h2>Custom addresses</h2><span class="muted" id="names-count"></span></div>
+        <div class="table-wrap"><table class="table" id="names"></table></div>
+      </section>
+      <section class="block">
+        <div class="block-head"><h2>Machine</h2><span class="muted" id="hostname"></span></div>
+        <div id="system"></div>
+      </section>
+    </div>
+
+    <section class="block">
+      <div class="block-head"><h2>Moderation</h2><span class="muted">Hidden server-list entries and blocked apps</span></div>
+      <div class="two-col tight" id="moderation"></div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>
