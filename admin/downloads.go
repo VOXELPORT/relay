@@ -16,6 +16,7 @@ import (
 // and, when Partner Center API credentials are configured, Microsoft Store
 // acquisitions per day (every 6 hours; Microsoft's data lags a day or two).
 type downloads struct {
+	st                             *store
 	repo, storeApp                 string
 	tenant, clientID, clientSecret string
 	client                         *http.Client
@@ -27,8 +28,8 @@ type downloads struct {
 	storeErr string
 }
 
-func newDownloads(repo, storeApp, tenant, clientID, secret string) *downloads {
-	return &downloads{repo: repo, storeApp: storeApp, tenant: tenant, clientID: clientID, clientSecret: secret,
+func newDownloads(st *store, repo, storeApp, tenant, clientID, secret string) *downloads {
+	return &downloads{st: st, repo: repo, storeApp: storeApp, tenant: tenant, clientID: clientID, clientSecret: secret,
 		client: &http.Client{Timeout: 20 * time.Second}}
 }
 
@@ -107,6 +108,14 @@ func (d *downloads) fetchGitHub() {
 		out = append(out, map[string]any{"tag": r.Tag, "published": r.Published, "count": n, "assets": assets})
 	}
 	d.setGitHub(map[string]any{"total": total, "releases": out, "fetched": time.Now()}, "")
+	d.mu.Lock()
+	snap := map[string]any{"github_total": total, "github_releases": out}
+	if d.store != nil {
+		snap["store_total_90d"] = d.store["total_90d"]
+		snap["store_days"] = d.store["days"]
+	}
+	d.mu.Unlock()
+	d.st.snapshotDownloads(snap)
 }
 
 func (d *downloads) setGitHub(v map[string]any, e string) {

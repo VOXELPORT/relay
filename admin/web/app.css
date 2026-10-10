@@ -69,7 +69,7 @@ h2 { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: .01em; }
 .block-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; }
 .two-col.tight { gap: 16px; }
-.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .seg button { font: inherit; font-size: 12.5px; padding: 5px 10px; background: transparent; color: var(--ink-2); border: 0; cursor: pointer; }
 .seg button[aria-pressed="true"] { background: var(--surface-2); color: var(--ink); font-weight: 600; }
 
@@ -126,6 +126,11 @@ details.players ul { margin: 6px 0 0; padding-left: 16px; }
 .mod-item { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
 .setup { font-size: 13px; color: var(--ink-2); background: var(--bg); border: 1px dashed var(--line); border-radius: 8px; padding: 10px 12px; }
 .setup ol { margin: 6px 0 0; padding-left: 18px; }
+.export { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+.export label { font-size: 12px; color: var(--muted); }
+.export select, .export input { font: inherit; font-size: 13px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
+.export select:focus-visible, .export input:focus-visible { outline: 2px solid var(--series-1); outline-offset: 1px; }
+h3.sub { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
 .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 9px 14px; font-weight: 600; z-index: 10; box-shadow: 0 8px 24px rgba(0,0,0,.4); }
 .toast.bad { border-color: var(--bad); color: #ffd9d9; }
 

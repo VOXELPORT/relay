@@ -10,9 +10,12 @@ Group=voxelport
 WorkingDirectory=/opt/voxelport-admin
 # VOXELPORT_ADMIN_TOKEN, VOXELPORT_ADMIN_PASSWORD and the optional STORE_* keys.
 EnvironmentFile=/etc/voxelport/admin.env
+# Every sample, session, event and download count, kept forever (see admin/store.go).
+StateDirectory=voxelport-admin
+StateDirectoryMode=0750
 # Listens on the Tailscale address only, so it is never reachable from the
 # internet. It starts before Tailscale has its IP on some boots; systemd retries.
-ExecStart=/opt/voxelport-admin/voxelport-admin -listen 100.89.127.14:2530 -relay http://127.0.0.1:2528 -web http://127.0.0.1:2529
+ExecStart=/opt/voxelport-admin/voxelport-admin -listen 100.89.127.14:2530 -relay http://127.0.0.1:2528 -web http://127.0.0.1:2529 -data-dir /var/lib/voxelport-admin -tz Asia/Kolkata
 Restart=always
 RestartSec=5
 NoNewPrivileges=true

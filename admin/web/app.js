@@ -47,6 +47,8 @@ function ago(ts) {
   return s < 60 ? 'just now' : `${fmtDur(s)} ago`;
 }
 function hhmm(ms) { const d = new Date(ms); return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
+function shortDate(ms) { return new Date(ms).toLocaleDateString([], { day: 'numeric', month: 'short' }); }
+function localDay(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
 function dayLabel(iso) { const d = new Date(iso + 'T00:00:00Z'); return d.toLocaleDateString([], { day: 'numeric', month: 'short', timeZone: 'UTC' }); }
 
 // ─── API ────────────────────────────────────────────────────────────────────
@@ -115,7 +117,7 @@ function niceMax(v) {
 function lineChart(el, pts, series, yFmt, opts = {}) {
   const W = el.clientWidth || 400, H = el.clientHeight || 170;
   const m = { l: 52, r: 10, t: 8, b: 20 };
-  if (!pts.length) { el.innerHTML = '<div class="empty">Collecting data… the first points appear within a minute.</div>'; return; }
+  if (!pts.length) { el.innerHTML = `<div class="empty">${range === '1h' || range === '24h' ? 'Collecting data… the first points appear within a minute.' : 'Not enough saved data for this range yet. Longer ranges fill in as the hours go by.'}</div>`; return; }
   const t0 = pts[0].t, t1 = pts[pts.length - 1].t || t0 + 1;
   let max = opts.max || 0;
   if (!opts.max) for (const p of pts) for (const s of series) max = Math.max(max, s.get(p));
@@ -129,9 +131,10 @@ function lineChart(el, pts, series, yFmt, opts = {}) {
     svg += `<line x1="${m.l}" x2="${W - m.r}" y1="${yy}" y2="${yy}"/><text x="${m.l - 6}" y="${yy + 3.5}" text-anchor="end">${esc(yFmt(v))}</text>`;
   }
   const ticks = 4;
+  const long = t1 - t0 > 36 * 3600e3;
   for (let i = 0; i <= ticks; i++) {
     const t = t0 + ((t1 - t0) / ticks) * i;
-    svg += `<text x="${x(t)}" y="${H - 4}" text-anchor="${i === 0 ? 'start' : i === ticks ? 'end' : 'middle'}">${esc(hhmm(t))}</text>`;
+    svg += `<text x="${x(t)}" y="${H - 4}" text-anchor="${i === 0 ? 'start' : i === ticks ? 'end' : 'middle'}">${esc(long ? shortDate(t) : hhmm(t))}</text>`;
   }
   svg += '</g>';
   for (const s of series) {
@@ -409,6 +412,51 @@ function renderAll() {
   renderModeration();
 }
 
+// ─── Saved data ─────────────────────────────────────────────────────────────
+const EVENT_TEXT = {
+  server_online: (e) => `Server online · ${e.name || 'port ' + e.port}${e.bedrock ? ' · Bedrock' : ''}`,
+  server_offline: (e) => `Server offline · ${e.name || 'port ' + e.port} · after ${fmtDur(e.duration_s)}`,
+  address_claimed: (e) => `Address claimed · ${e.name}`,
+  address_released: (e) => `Address released · ${e.name}`,
+  service: (e) => `${e.service}: ${e.from} → ${e.to}`,
+  admin_action: (e) => `You: ${e.action} ${e.id || e.name || ''}`,
+  relay_api_down: () => 'Relay operator API unreachable',
+  relay_api_back: () => 'Relay operator API back',
+  web_stats_down: () => 'Website stats unreachable',
+  web_stats_back: () => 'Website stats back',
+};
+
+async function loadSaved() {
+  let d;
+  try { d = await api('/api/saved'); } catch { return; }
+  const u = d.usage || {};
+  $('#saved-usage').textContent = u.since ? `Recording since ${u.since} · ${fmtBytes(u.bytes)} in ${fmtNum(u.files)} files · nothing is ever deleted` : 'Recording started';
+  const s = d.sessions || [];
+  $('#sessions').innerHTML = s.length
+    ? `<thead><tr><th>Server</th><th>Ended</th><th class="r">Lasted</th><th class="r">Players</th><th class="r">Traffic</th></tr></thead><tbody>${s.map((x) => `<tr>
+        <td><b>${esc(x.title || x.address)}</b>${x.bedrock ? '<span class="tag">Bedrock</span>' : ''}<div class="muted mono">${esc(x.title ? x.address : 'id ' + x.id)}</div></td>
+        <td>${esc(new Date(x.end).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</td>
+        <td class="r">${esc(fmtDur(x.duration_s))}</td>
+        <td class="r num">${x.unique_players} <span class="muted">· peak ${x.peak_players}</span></td>
+        <td class="r num">${fmtBytes(x.bytes_in + x.bytes_out)}</td></tr>`).join('')}</tbody>`
+    : '<tr><td class="empty">Sessions appear here when a server goes offline.</td></tr>';
+  const ev = d.events || [];
+  $('#events').innerHTML = ev.length
+    ? `<tbody>${ev.map((e) => `<tr><td class="muted" style="white-space:nowrap">${esc(new Date(e.t).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</td><td>${esc((EVENT_TEXT[e.type] || (() => e.type))(e))}</td></tr>`).join('')}</tbody>`
+    : '<tr><td class="empty">Nothing has happened yet.</td></tr>';
+}
+
+(() => {
+  const now = new Date();
+  $('#ex-to').value = localDay(now);
+  $('#ex-from').value = localDay(new Date(now.getTime() - 6 * 86400e3));
+  $('#export-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const p = new URLSearchParams({ what: $('#ex-what').value, from: $('#ex-from').value, to: $('#ex-to').value, format: $('#ex-format').value });
+    location.href = `/api/export?${p}`;
+  });
+})();
+
 // ─── History charts ─────────────────────────────────────────────────────────
 let hist = [];
 function renderCharts() {
@@ -472,4 +520,6 @@ addLegends();
 refresh();
 loadHistory();
 setInterval(refresh, 5000);
-setInterval(loadHistory, 15000);
+setInterval(() => { if (range === '1h' || range === '24h') loadHistory(); }, 15000);
+loadSaved();
+setInterval(loadSaved, 30000);
