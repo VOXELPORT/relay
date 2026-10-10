@@ -145,6 +145,10 @@ func (pc *playerConn) writeLoop() {
 	for {
 		select {
 		case data := <-pc.outbox:
+			if data == nil { // closeAfterFlush marker: everything before it is written
+				pc.close()
+				return
+			}
 			pc.conn.SetWriteDeadline(time.Now().Add(playerWriteTimeout))
 			if _, err := pc.conn.Write(data); err != nil {
 				pc.close()
@@ -169,6 +173,21 @@ func (pc *playerConn) enqueue(data []byte) {
 	case <-pc.done:
 		// Already shutting down; nothing to do.
 	default:
+		pc.close()
+	}
+}
+
+// closeAfterFlush closes the player once everything already queued for it
+// has been written. A host often sends its last bytes and "close" back to
+// back (a Minecraft server closes right after answering a status ping); a
+// plain close would race the writer and drop that reply.
+func (pc *playerConn) closeAfterFlush() {
+	select {
+	case pc.outbox <- nil:
+		// Bound how long a stuck player can hold its socket open.
+		time.AfterFunc(playerWriteTimeout, pc.close)
+	case <-pc.done:
+	default: // outbox full: the player isn't reading anyway
 		pc.close()
 	}
 }
@@ -790,7 +809,7 @@ func (r *relay) handleClientMsg(c *client, m Msg) {
 		}
 		c.mu.Unlock()
 		if pc != nil {
-			pc.close()
+			pc.closeAfterFlush()
 		}
 
 	case "ping":

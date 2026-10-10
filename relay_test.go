@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1590,4 +1591,39 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(b[i:])
+}
+
+// A host that sends its last bytes and "close" back to back (a Minecraft
+// server answering a status ping) must not have that reply dropped.
+func TestHostCloseFlushesPendingData(t *testing.T) {
+	srv := newTestServer()
+	defer srv.Close()
+	ws := dialWS(t, srv)
+	defer ws.Close()
+	writeMsg(t, ws, Msg{Type: "register", Token: "vp_flushtoken12345"})
+	portMsg := readMsg(t, ws)
+
+	for i := 0; i < 20; i++ {
+		player, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", itoa(portMsg.Port)))
+		if err != nil {
+			t.Fatalf("player dial: %v", err)
+		}
+		connMsg := readMsg(t, ws)
+		reply := strings.Repeat("status-reply-", 500)
+		writeMsg(t, ws, Msg{Type: "data", Conn: connMsg.Conn, Data: base64.StdEncoding.EncodeToString([]byte(reply))})
+		writeMsg(t, ws, Msg{Type: "close", Conn: connMsg.Conn})
+		player.SetReadDeadline(time.Now().Add(3 * time.Second))
+		got, _ := io.ReadAll(player)
+		player.Close()
+		if string(got) != reply {
+			t.Fatalf("attempt %d: player got %d of %d bytes", i, len(got), len(reply))
+		}
+		// Drain the relay's close notification for this player.
+		for {
+			m := readMsg(t, ws)
+			if m.Type == "close" && m.Conn == connMsg.Conn {
+				break
+			}
+		}
+	}
 }
