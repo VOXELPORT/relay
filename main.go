@@ -43,6 +43,7 @@ func main() {
 	publicHost := flag.String("public-host", "play.voxelport.in", "hostname players use with a port; also the target of custom-address DNS records")
 	dataDir := flag.String("data-dir", "", "directory for persistent state (custom addresses, server-list takedowns); empty disables custom addresses")
 	dnsZone := flag.String("dns-zone", "voxelport.in", "Cloudflare zone custom addresses are created in (token from $CF_DNS_API_TOKEN)")
+	adminAddr := flag.String("admin-addr", "", "loopback address for the operator API used by voxelport-admin (e.g. 127.0.0.1:2528; token from $VOXELPORT_ADMIN_TOKEN)")
 	flag.Parse()
 
 	if err := validateConfig(*minPort, *maxPort, *maxTunnelsPerIP, *maxPlayersPerIP); err != nil {
@@ -85,6 +86,7 @@ func main() {
 	if names != nil {
 		go r.nameSweepLoop()
 	}
+	r.startAdmin(*adminAddr, os.Getenv("VOXELPORT_ADMIN_TOKEN"), *dataDir)
 	if *secret != "" {
 		log.Printf("token gate ENABLED — only vp_<secret>… tokens accepted")
 	}

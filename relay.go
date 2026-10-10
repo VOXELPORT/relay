@@ -267,6 +267,15 @@ type relay struct {
 	names      *nameStore
 	publicHost string
 	hidden     *hiddenList
+
+	// Operator API (admin.go): bans, and lifetime totals that survive
+	// tunnels closing. banned is nil unless the API runs with -data-dir.
+	banned        *banList
+	startedAt     time.Time
+	closedIn      atomic.Int64
+	closedOut     atomic.Int64
+	closedConns   atomic.Int64
+	tunnelsServed atomic.Int64
 }
 
 // stickyPortInfo remembers which port a token last used, and when, so a
@@ -328,6 +337,7 @@ func newRelay(cfg relayConfig) *relay {
 		names:                 cfg.Names,
 		publicHost:            cfg.PublicHost,
 		hidden:                cfg.Hidden,
+		startedAt:             time.Now(),
 	}
 	if r.publicHost == "" {
 		r.publicHost = "localhost"
@@ -626,6 +636,11 @@ func (r *relay) handleWS(w http.ResponseWriter, req *http.Request) {
 
 	sum := sha256.Sum256([]byte(reg.Token))
 	clientID := hex.EncodeToString(sum[:])
+	if r.banned.banned(clientID) {
+		sendErr(ws, "This app has been blocked from the VoxelPort relay.")
+		ws.Close()
+		return
+	}
 
 	// Everything from here through publishing the new client is one atomic
 	// registration: evicting any previous tunnel for this token, checking the
@@ -690,6 +705,7 @@ func (r *relay) handleWS(w http.ResponseWriter, req *http.Request) {
 	r.portByID[clientID] = stickyPortInfo{port: port, lastSeen: time.Now()}
 	r.mu.Unlock()
 	r.addTunnel(ip)
+	r.tunnelsServed.Add(1)
 
 	r.regSerialize.Unlock()
 
@@ -724,6 +740,9 @@ func (r *relay) handleWS(w http.ResponseWriter, req *http.Request) {
 		c.mu.Lock()
 		peak := c.peakPlayers
 		c.mu.Unlock()
+		r.closedIn.Add(c.bytesIn.Load())
+		r.closedOut.Add(c.bytesOut.Load())
+		r.closedConns.Add(c.totalConns.Load())
 		// Durable per-session usage record (retained in journald/syslog — parse for billing).
 		log.Printf("[usage] token=%s port=%d uptime=%s conns=%d peak_players=%d in=%s out=%s",
 			clientID[:8], port, time.Since(c.startedAt).Round(time.Second),
