@@ -273,7 +273,10 @@ func (s *nameStore) claim(clientID, name string, port int) (nameEntry, error) {
 			s.saveLocked()
 			s.mu.Unlock()
 		}
-		return *existing, nil
+		s.mu.Lock()
+		out := *existing
+		s.mu.Unlock()
+		return out, nil
 	}
 
 	taken, err := s.dns.Exists(ctx, name)
@@ -300,6 +303,7 @@ func (s *nameStore) claim(clientID, name string, port int) (nameEntry, error) {
 	if err := s.saveLocked(); err != nil {
 		log.Printf("[names] save: %v", err)
 	}
+	out := *e
 	s.mu.Unlock()
 
 	if old != nil {
@@ -308,7 +312,7 @@ func (s *nameStore) claim(clientID, name string, port int) (nameEntry, error) {
 		}
 	}
 	log.Printf("[names] %s… claimed %s -> port %d", clientID[:8], name, port)
-	return *e, nil
+	return out, nil
 }
 
 // release removes clientID's custom address (a no-op if it has none).
