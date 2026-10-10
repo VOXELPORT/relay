@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -39,6 +40,9 @@ func main() {
 	directListen := flag.String("direct-listen", "", "optional second listener serving wss:// directly (e.g. :26499), bypassing any CDN/tunnel in front of -listen")
 	directCert := flag.String("direct-tls-cert", "", "TLS certificate (PEM) for -direct-listen; reloaded from disk when it changes")
 	directKey := flag.String("direct-tls-key", "", "TLS key (PEM) for -direct-listen")
+	publicHost := flag.String("public-host", "play.voxelport.in", "hostname players use with a port; also the target of custom-address DNS records")
+	dataDir := flag.String("data-dir", "", "directory for persistent state (custom addresses, server-list takedowns); empty disables custom addresses")
+	dnsZone := flag.String("dns-zone", "voxelport.in", "Cloudflare zone custom addresses are created in (token from $CF_DNS_API_TOKEN)")
 	flag.Parse()
 
 	if err := validateConfig(*minPort, *maxPort, *maxTunnelsPerIP, *maxPlayersPerIP); err != nil {
@@ -52,6 +56,21 @@ func main() {
 		log.Fatalf("invalid -trusted-proxy-cidrs: %v", err)
 	}
 
+	var names *nameStore
+	var hidden *hiddenList
+	if *dataDir != "" {
+		hidden = newHiddenList(filepath.Join(*dataDir, "hidden.txt"))
+		if token := os.Getenv("CF_DNS_API_TOKEN"); token != "" {
+			names, err = loadNameStore(filepath.Join(*dataDir, "names.json"), *dnsZone, newCloudflareDNS(token, *dnsZone, *publicHost))
+			if err != nil {
+				log.Fatalf("custom addresses: %v", err)
+			}
+			log.Printf("custom addresses ENABLED under *.%s", *dnsZone)
+		} else {
+			log.Printf("custom addresses disabled: CF_DNS_API_TOKEN is not set")
+		}
+	}
+
 	r := newRelay(relayConfig{
 		MinPort:               *minPort,
 		MaxPort:               *maxPort,
@@ -59,7 +78,13 @@ func main() {
 		MaxTunnelsPerIP:       *maxTunnelsPerIP,
 		MaxPlayersPerIPTunnel: *maxPlayersPerIP,
 		TrustedProxies:        trustedProxies,
+		Names:                 names,
+		PublicHost:            *publicHost,
+		Hidden:                hidden,
 	})
+	if names != nil {
+		go r.nameSweepLoop()
+	}
 	if *secret != "" {
 		log.Printf("token gate ENABLED — only vp_<secret>… tokens accepted")
 	}
@@ -68,6 +93,7 @@ func main() {
 	mux.HandleFunc("/", r.servePanel)
 	mux.HandleFunc("/ws", r.handleWS)
 	mux.HandleFunc("/api/status", r.apiStatus)
+	mux.HandleFunc("/api/servers", r.apiServers)
 
 	srv := &http.Server{
 		Addr:    *listen,
