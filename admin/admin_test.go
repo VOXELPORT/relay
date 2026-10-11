@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -68,5 +69,44 @@ func TestLoginSessionAndLockout(t *testing.T) {
 	a.login(rec, loginReq("correct horse battery"))
 	if loc := rec.Header().Get("Location"); loc != "/login.html?e=locked" {
 		t.Fatalf("not locked out: %s", loc)
+	}
+}
+
+// Blocks and hiding go to every relay; kick and release go to one region.
+func TestActionRouting(t *testing.T) {
+	hits := map[string][]string{}
+	relay := func(region string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			b := new(strings.Builder)
+			_, _ = io.Copy(b, r.Body)
+			hits[region] = append(hits[region], b.String())
+			w.Write([]byte(`{"ok":true}`))
+		}))
+	}
+	in, na := relay("in"), relay("na")
+	defer in.Close()
+	defer na.Close()
+	u := &upstreams{relay: in.URL, relayNA: na.URL, token: "x", client: http.DefaultClient}
+
+	for body, want := range map[string][2]int{
+		`{"action":"ban","id":"abcdef12"}`:                {1, 1},
+		`{"action":"unhide","name":"steve"}`:              {1, 1},
+		`{"action":"kick","id":"abcdef12","region":"na"}`: {0, 1},
+		`{"action":"release_name","id":"abcdef12"}`:       {1, 0},
+		`{"action":"kick","id":"abcdef12","region":"in"}`: {1, 0},
+	} {
+		hits = map[string][]string{}
+		if code, _ := u.action([]byte(body)); code != http.StatusOK {
+			t.Fatalf("%s: status %d", body, code)
+		}
+		if len(hits["in"]) != want[0] || len(hits["na"]) != want[1] {
+			t.Errorf("%s: India %d, NA %d calls; want %v", body, len(hits["in"]), len(hits["na"]), want)
+		}
+	}
+
+	// Without an NA relay, an NA-only action is refused instead of hitting India.
+	u.relayNA = ""
+	if code, _ := u.action([]byte(`{"action":"kick","id":"abcdef12","region":"na"}`)); code != http.StatusBadRequest {
+		t.Errorf("NA kick without an NA relay: status %d", code)
 	}
 }

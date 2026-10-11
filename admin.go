@@ -357,6 +357,8 @@ func (r *relay) adminHandler(token string) http.Handler {
 		switch {
 		case req.Method == http.MethodGet && req.URL.Path == "/state":
 			writeJSON(w, http.StatusOK, r.adminState())
+		case req.Method == http.MethodGet && req.URL.Path == "/system":
+			writeJSON(w, http.StatusOK, machineInfo())
 		case req.Method == http.MethodPost && req.URL.Path == "/action":
 			var a adminAction
 			if err := json.NewDecoder(http.MaxBytesReader(w, req.Body, 4096)).Decode(&a); err != nil {
