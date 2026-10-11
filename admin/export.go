@@ -13,12 +13,15 @@ import (
 
 var sampleCols = []string{"time", "cpu_percent", "memory_used_bytes", "disk_used_bytes", "temperature_c", "load_1m",
 	"internet_down_bytes_per_s", "internet_up_bytes_per_s", "relay_in_bytes_per_s", "relay_out_bytes_per_s",
-	"players", "servers", "website_visitors_now"}
+	"players", "servers", "website_visitors_now",
+	"na_relay_in_bytes_per_s", "na_relay_out_bytes_per_s", "na_players", "na_servers", "na_cpu_percent",
+	"na_internet_down_bytes_per_s", "na_internet_up_bytes_per_s"}
 
 func sampleRow(p sample, loc *time.Location) []string {
 	f := func(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }
 	return []string{time.UnixMilli(p.T).In(loc).Format(time.RFC3339), f(p.CPU), f(p.MemUsed), f(p.DiskUsed), f(p.TempC), f(p.Load1),
-		f(p.NetRx), f(p.NetTx), f(p.RelayIn), f(p.RelayOut), f(p.Players), f(p.Tunnels), f(p.WebLive)}
+		f(p.NetRx), f(p.NetTx), f(p.RelayIn), f(p.RelayOut), f(p.Players), f(p.Tunnels), f(p.WebLive),
+		f(p.NAIn), f(p.NAOut), f(p.NAPlayers), f(p.NATunnels), f(p.NACPU), f(p.NANetRx), f(p.NANetTx)}
 }
 
 // exportData serves GET /api/export?what=…&from=YYYY-MM-DD&to=YYYY-MM-DD&format=csv|json
@@ -64,7 +67,7 @@ func exportData(w http.ResponseWriter, r *http.Request, st *store, up *upstreams
 	case "sessions":
 		recs := st.records("sessions.jsonl", from, to)
 		header = []string{"start", "end", "duration_s", "address", "name", "port", "id", "title", "mode", "version", "listed", "bedrock",
-			"unique_players", "peak_players", "peak_bedrock", "connections", "bytes_in", "bytes_out"}
+			"unique_players", "peak_players", "peak_bedrock", "connections", "bytes_in", "bytes_out", "region"}
 		jsonOut = recs
 		for _, m := range recs {
 			row := []string{msTime(m["start"], st.loc), msTime(m["end"], st.loc)}

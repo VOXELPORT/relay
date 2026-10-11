@@ -47,8 +47,11 @@ type liveSession struct {
 }
 
 // tracker turns successive relay snapshots into session records and events.
+// region is "" for the home (India) relay and "na" for North America; it is
+// added to everything the tracker records.
 type tracker struct {
 	st       *store
+	region   string
 	started  bool
 	sessions map[string]*liveSession
 	names    map[string]string // name -> id
@@ -57,8 +60,8 @@ type tracker struct {
 	webOK    bool
 }
 
-func newTracker(st *store) *tracker {
-	return &tracker{st: st, sessions: map[string]*liveSession{}, names: map[string]string{}}
+func newTracker(st *store, region string) *tracker {
+	return &tracker{st: st, region: region, sessions: map[string]*liveSession{}, names: map[string]string{}}
 }
 
 func (tr *tracker) observe(relay map[string]any, relayErr error, webErr error, services map[string]string) {
@@ -68,20 +71,20 @@ func (tr *tracker) observe(relay map[string]any, relayErr error, webErr error, s
 	// Upstream reachability and service health changes.
 	if relayOK := relayErr == nil; first || relayOK != tr.relayOK {
 		if !first {
-			tr.st.event(map[bool]string{true: "relay_api_back", false: "relay_api_down"}[relayOK], map[string]any{"error": errText(relayErr)})
+			tr.event(map[bool]string{true: "relay_api_back", false: "relay_api_down"}[relayOK], map[string]any{"error": errText(relayErr)})
 		}
 		tr.relayOK = relayOK
 	}
 	if webOK := webErr == nil; first || webOK != tr.webOK {
 		if !first {
-			tr.st.event(map[bool]string{true: "web_stats_back", false: "web_stats_down"}[webOK], map[string]any{"error": errText(webErr)})
+			tr.event(map[bool]string{true: "web_stats_back", false: "web_stats_down"}[webOK], map[string]any{"error": errText(webErr)})
 		}
 		tr.webOK = webOK
 	}
 	if tr.services != nil {
 		for name, state := range services {
 			if prev := tr.services[name]; prev != "" && prev != state {
-				tr.st.event("service", map[string]any{"service": name, "from": prev, "to": state})
+				tr.event("service", map[string]any{"service": name, "from": prev, "to": state})
 			}
 		}
 	}
@@ -109,7 +112,7 @@ func (tr *tracker) observe(relay map[string]any, relayErr error, webErr error, s
 			s = &liveSession{ID: t.ID, Port: t.Port, Since: t.Since, players: map[string]bool{}}
 			tr.sessions[key] = s
 			if !first {
-				tr.st.event("server_online", map[string]any{"id": t.ID, "port": t.Port, "name": t.Name, "bedrock": t.UDP})
+				tr.event("server_online", map[string]any{"id": t.ID, "port": t.Port, "name": t.Name, "bedrock": t.UDP})
 			}
 		}
 		s.Name, s.Bedrock, s.Listed = t.Name, t.UDP, t.Listing != nil
@@ -142,14 +145,14 @@ func (tr *tracker) observe(relay map[string]any, relayErr error, webErr error, s
 		} else {
 			address = rs.PublicHost + ":" + itoa(s.Port)
 		}
-		tr.st.record("sessions.jsonl", map[string]any{
+		tr.st.record("sessions.jsonl", tr.tag(map[string]any{
 			"t": now.UnixMilli(), "id": s.ID, "port": s.Port, "name": s.Name, "address": address,
 			"title": s.Title, "mode": s.Mode, "version": s.Version, "listed": s.Listed, "bedrock": s.Bedrock,
 			"start": s.Since.UnixMilli(), "end": now.UnixMilli(), "duration_s": int64(now.Sub(s.Since).Seconds()),
 			"unique_players": len(s.players), "peak_players": s.Peak, "peak_bedrock": s.PeakBedrock,
 			"connections": s.Conns, "bytes_in": s.BytesIn, "bytes_out": s.BytesOut,
-		})
-		tr.st.event("server_offline", map[string]any{"id": s.ID, "port": s.Port, "name": s.Name, "duration_s": int64(now.Sub(s.Since).Seconds())})
+		}))
+		tr.event("server_offline", map[string]any{"id": s.ID, "port": s.Port, "name": s.Name, "duration_s": int64(now.Sub(s.Since).Seconds())})
 	}
 
 	// Custom-address claims and releases.
@@ -157,15 +160,27 @@ func (tr *tracker) observe(relay map[string]any, relayErr error, webErr error, s
 	for _, n := range rs.Names {
 		names[n.Name] = n.ID
 		if _, ok := tr.names[n.Name]; !ok && !first {
-			tr.st.event("address_claimed", map[string]any{"name": n.Name, "id": n.ID, "port": n.Port})
+			tr.event("address_claimed", map[string]any{"name": n.Name, "id": n.ID, "port": n.Port})
 		}
 	}
 	for name, id := range tr.names {
 		if _, ok := names[name]; !ok {
-			tr.st.event("address_released", map[string]any{"name": name, "id": id})
+			tr.event("address_released", map[string]any{"name": name, "id": id})
 		}
 	}
 	tr.names = names
+}
+
+// event records an event, tagged with the tracker's region.
+func (tr *tracker) event(kind string, fields map[string]any) {
+	tr.st.event(kind, tr.tag(fields))
+}
+
+func (tr *tracker) tag(m map[string]any) map[string]any {
+	if tr.region != "" {
+		m["region"] = tr.region
+	}
+	return m
 }
 
 // liveSessions returns the sessions in progress, for the dashboard.

@@ -22,10 +22,19 @@ const (
 	longLen     = 1440 // 24 hours of 1-minute averages
 )
 
-// upstreams talks to the relay's operator API and the website's stats API.
+// upstreams talks to the relays' operator APIs and the website's stats API.
+// relayNA is the North America relay's operator API, reached through an SSH
+// tunnel over Tailscale ("" when there is no second region).
 type upstreams struct {
-	relay, web, token string
-	client            *http.Client
+	relay, relayNA, web, token string
+	client                     *http.Client
+}
+
+func (u *upstreams) relayFor(region string) string {
+	if region == "na" {
+		return u.relayNA
+	}
+	return u.relay
 }
 
 func (u *upstreams) get(base, path string) (map[string]any, error) {
@@ -46,8 +55,32 @@ func (u *upstreams) get(base, path string) (map[string]any, error) {
 	return out, nil
 }
 
+// action runs an operator action. Blocks and server-list hiding are lists
+// every relay keeps, so they go to all regions; kick and release_name go to
+// the region the server is on ("region" in the body, India by default).
 func (u *upstreams) action(body []byte) (int, map[string]any) {
-	req, _ := http.NewRequest("POST", u.relay+"/action", bytes.NewReader(body))
+	var a struct{ Action, Region string }
+	json.Unmarshal(body, &a)
+	switch a.Action {
+	case "ban", "unban", "hide", "unhide":
+		code, out := u.actionOn(u.relay, body)
+		if u.relayNA != "" {
+			if c2, out2 := u.actionOn(u.relayNA, body); c2 != http.StatusOK && code == http.StatusOK {
+				msg, _ := out2["error"].(string)
+				return c2, map[string]any{"error": "done in India, but the North America relay said: " + msg}
+			}
+		}
+		return code, out
+	}
+	base := u.relayFor(a.Region)
+	if base == "" {
+		return http.StatusBadRequest, map[string]any{"error": "that region isn't configured"}
+	}
+	return u.actionOn(base, body)
+}
+
+func (u *upstreams) actionOn(base string, body []byte) (int, map[string]any) {
+	req, _ := http.NewRequest("POST", base+"/action", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+u.token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
@@ -79,6 +112,15 @@ type sample struct {
 	Load1    float64 `json:"load"`
 	DiskUsed float64 `json:"disk"` // bytes used on /
 	WebLive  float64 `json:"web"`  // website visitors active in the last 5 minutes
+
+	// North America relay (zero before it existed, or while unreachable).
+	NAIn      float64 `json:"nin,omitempty"`  // bytes/s through the NA relay, players -> hosts
+	NAOut     float64 `json:"nout,omitempty"` // hosts -> players
+	NAPlayers float64 `json:"np,omitempty"`
+	NATunnels float64 `json:"nt,omitempty"`
+	NACPU     float64 `json:"ncpu,omitempty"`
+	NANetRx   float64 `json:"nrx,omitempty"` // bytes/s on the NA machine's internet interface
+	NANetTx   float64 `json:"ntx,omitempty"` // what AWS bills as data transfer out
 }
 
 type sampler struct {
@@ -101,13 +143,38 @@ type sampler struct {
 	prevNet   [2]uint64 // rx, tx
 	prevRelay [2]float64
 	prevAt    time.Time
+
+	trNA       *tracker
+	relayNA    map[string]any
+	relayNAErr string
+	naSys      map[string]any // latest NA machine info, with rates added
+	naSysErr   string
+	prevNA     naCounters
+	egress     egressCache
+}
+
+// naCounters are the NA relay's and machine's cumulative counters from the
+// previous tick, for turning them into rates.
+type naCounters struct {
+	at                time.Time
+	relayIn, relayOut float64
+	cpuBusy, cpuTotal float64
+	netRx, netTx      float64
+}
+
+// egressCache is the NA machine's internet upload this calendar month (UTC,
+// as AWS bills it), summed from the saved minute samples every 5 minutes.
+type egressCache struct {
+	month string
+	bytes float64
+	at    time.Time
 }
 
 func newSampler(iface string, up *upstreams, st *store) *sampler {
 	if iface == "" {
 		iface = busiestIface()
 	}
-	s := &sampler{iface: iface, up: up, st: st, tr: newTracker(st)}
+	s := &sampler{iface: iface, up: up, st: st, tr: newTracker(st, ""), trNA: newTracker(st, "na")}
 	// Pick up where we left off: the charts survive a restart.
 	now := time.Now()
 	s.short = st.raw5s(now.Add(-time.Hour), now)
@@ -133,13 +200,24 @@ func (s *sampler) tick() {
 
 	s.tr.observe(relay, relayErr, webErr, services)
 
+	var relayNA, naSys map[string]any
+	var relayNAErr, naSysErr error
+	if s.up.relayNA != "" {
+		relayNA, relayNAErr = s.up.get(s.up.relayNA, "/state")
+		naSys, naSysErr = s.up.get(s.up.relayNA, "/system")
+		s.trNA.observe(relayNA, relayNAErr, nil, nil)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.services = services
 	s.relay, s.web = relay, web
 	s.relayErr, s.webErr = errText(relayErr), errText(webErr)
+	s.relayNA, s.relayNAErr = relayNA, errText(relayNAErr)
+	s.naSysErr = errText(naSysErr)
 
 	pt := sample{T: now.UnixMilli(), MemUsed: float64(memTotal - memAvail)}
+	s.sampleNA(&pt, now, relayNA, naSys)
 	var rIn, rOut float64
 	if relay != nil {
 		t, _ := relay["totals"].(map[string]any)
@@ -209,6 +287,87 @@ func (s *sampler) tick() {
 	}
 }
 
+// sampleNA fills the NA fields of pt from the NA relay's state and machine
+// counters, and keeps s.naSys (with rates) for the overview. Called with
+// s.mu held.
+func (s *sampler) sampleNA(pt *sample, now time.Time, relay, sys map[string]any) {
+	num := func(m map[string]any, k string) float64 { v, _ := m[k].(float64); return v }
+	var cur naCounters
+	cur.at = now
+	if relay != nil {
+		t, _ := relay["totals"].(map[string]any)
+		cur.relayIn, cur.relayOut = num(t, "bytes_in"), num(t, "bytes_out")
+		pt.NAPlayers, pt.NATunnels = num(t, "players"), num(t, "tunnels")
+	}
+	if sys != nil {
+		cur.cpuBusy, cur.cpuTotal = num(sys, "cpu_busy"), num(sys, "cpu_total")
+		cur.netRx, cur.netTx = num(sys, "net_rx"), num(sys, "net_tx")
+	}
+	if p := s.prevNA; !p.at.IsZero() {
+		dt := now.Sub(p.at).Seconds()
+		if relay != nil && p.relayOut > 0 {
+			pt.NAIn = rate(cur.relayIn, p.relayIn, dt)
+			pt.NAOut = rate(cur.relayOut, p.relayOut, dt)
+		}
+		if sys != nil && p.cpuTotal > 0 {
+			if cur.cpuTotal > p.cpuTotal {
+				pt.NACPU = 100 * (cur.cpuBusy - p.cpuBusy) / (cur.cpuTotal - p.cpuTotal)
+			}
+			pt.NANetRx = rate(cur.netRx, p.netRx, dt)
+			pt.NANetTx = rate(cur.netTx, p.netTx, dt)
+		}
+	}
+	// Keep the last good counters when a poll fails, so the next rate spans the gap.
+	if relay == nil {
+		cur.relayIn, cur.relayOut = s.prevNA.relayIn, s.prevNA.relayOut
+	}
+	if sys == nil {
+		cur.cpuBusy, cur.cpuTotal, cur.netRx, cur.netTx = s.prevNA.cpuBusy, s.prevNA.cpuTotal, s.prevNA.netRx, s.prevNA.netTx
+	}
+	s.prevNA = cur
+
+	if sys == nil {
+		s.naSys = nil
+		return
+	}
+	out := map[string]any{}
+	for k, v := range sys {
+		out[k] = v
+	}
+	out["cpu"], out["net_rx_rate"], out["net_tx_rate"] = pt.NACPU, pt.NANetRx, pt.NANetTx
+	out["relay_in"], out["relay_out"] = pt.NAIn, pt.NAOut
+	out["egress_month"], out["egress_month_name"] = s.egressThisMonth(now)
+	s.naSys = out
+}
+
+// egressThisMonth is the NA machine's upload since the 1st of this month
+// (UTC), from saved minute averages plus the samples not yet averaged.
+// Called with s.mu held.
+func (s *sampler) egressThisMonth(now time.Time) (float64, string) {
+	utc := now.UTC()
+	month := utc.Format("2006-01")
+	if s.egress.month != month || now.Sub(s.egress.at) > 5*time.Minute {
+		start := time.Date(utc.Year(), utc.Month(), 1, 0, 0, 0, 0, time.UTC)
+		total := 0.0
+		for _, p := range s.st.minutes(start, now) {
+			total += p.NANetTx * 60
+		}
+		s.egress = egressCache{month: month, bytes: total, at: now}
+	}
+	pending := 0.0
+	for _, p := range s.pending {
+		pending += p.NANetTx * sampleEvery.Seconds()
+	}
+	// Minutes saved since the cache was filled.
+	recent := 0.0
+	for _, p := range s.long {
+		if p.T > s.egress.at.UnixMilli() {
+			recent += p.NANetTx * 60
+		}
+	}
+	return s.egress.bytes + recent + pending, utc.Format("January")
+}
+
 func errText(err error) string {
 	if err == nil {
 		return ""
@@ -246,11 +405,20 @@ func average(ps []sample) sample {
 		a.Load1 += p.Load1
 		a.DiskUsed += p.DiskUsed
 		a.WebLive += p.WebLive
+		a.NAIn += p.NAIn
+		a.NAOut += p.NAOut
+		a.NAPlayers += p.NAPlayers
+		a.NATunnels += p.NATunnels
+		a.NACPU += p.NACPU
+		a.NANetRx += p.NANetRx
+		a.NANetTx += p.NANetTx
 	}
 	n := float64(len(ps))
 	return sample{T: ps[len(ps)-1].T, CPU: a.CPU / n, MemUsed: a.MemUsed / n, NetRx: a.NetRx / n, NetTx: a.NetTx / n,
 		RelayIn: a.RelayIn / n, RelayOut: a.RelayOut / n, Players: a.Players / n, Tunnels: a.Tunnels / n,
-		TempC: a.TempC / n, Load1: a.Load1 / n, DiskUsed: a.DiskUsed / n, WebLive: a.WebLive / n}
+		TempC: a.TempC / n, Load1: a.Load1 / n, DiskUsed: a.DiskUsed / n, WebLive: a.WebLive / n,
+		NAIn: a.NAIn / n, NAOut: a.NAOut / n, NAPlayers: a.NAPlayers / n, NATunnels: a.NATunnels / n,
+		NACPU: a.NACPU / n, NANetRx: a.NANetRx / n, NANetTx: a.NANetTx / n}
 }
 
 // history returns chart points for a range: the last hour and day come from
@@ -293,6 +461,10 @@ func overview(up *upstreams, s *sampler, dl *downloads) map[string]any {
 		"relay_err": s.relayErr,
 		"web":       s.web,
 		"web_err":   s.webErr,
+	}
+	if up.relayNA != "" {
+		out["relay_na"], out["relay_na_err"] = s.relayNA, s.relayNAErr
+		out["na_system"], out["na_system_err"] = s.naSys, s.naSysErr
 	}
 	s.mu.Unlock()
 	out["downloads"] = dl.snapshot()

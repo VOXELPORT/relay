@@ -10,7 +10,7 @@
 //
 // Configuration (EnvironmentFile=/etc/voxelport/admin.env):
 //
-//	VOXELPORT_ADMIN_TOKEN     shared with the relay and website (24+ chars)
+//	VOXELPORT_ADMIN_TOKEN     shared with the relays and website (24+ chars)
 //	VOXELPORT_ADMIN_PASSWORD  the dashboard password (12+ chars)
 //	STORE_TENANT_ID, STORE_CLIENT_ID, STORE_CLIENT_SECRET   optional: Microsoft
 //	                          Store acquisitions via the Partner Center analytics API
@@ -37,6 +37,7 @@ var webFS embed.FS
 func main() {
 	listen := flag.String("listen", "100.89.127.14:2530", "private address to serve the dashboard on (the Tailscale IP)")
 	relayAPI := flag.String("relay", "http://127.0.0.1:2528", "relay operator API")
+	relayNA := flag.String("relay-na", "", "North America relay operator API (e.g. http://127.0.0.1:2531, an SSH tunnel to its loopback API); empty if there is none")
 	webAPI := flag.String("web", "http://127.0.0.1:2529", "website stats API")
 	iface := flag.String("iface", "", "network interface to chart (default: the busiest physical one)")
 	repo := flag.String("github-repo", "VOXELPORT/VoxelPort-App", "GitHub repo whose release downloads are counted")
@@ -65,7 +66,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("data dir: %v", err)
 	}
-	up := &upstreams{relay: *relayAPI, web: *webAPI, token: token, client: &http.Client{Timeout: 4 * time.Second}}
+	up := &upstreams{relay: *relayAPI, relayNA: *relayNA, web: *webAPI, token: token, client: &http.Client{Timeout: 4 * time.Second}}
 	sys := newSampler(*iface, up, st)
 	go sys.run()
 	dl := newDownloads(st, *repo, *storeApp, os.Getenv("STORE_TENANT_ID"), os.Getenv("STORE_CLIENT_ID"), os.Getenv("STORE_CLIENT_SECRET"))

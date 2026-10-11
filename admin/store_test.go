@@ -71,7 +71,7 @@ func relaySnapshot(players ...string) map[string]any {
 
 func TestTrackerRecordsSessionsWithoutIPs(t *testing.T) {
 	st := testStore(t)
-	tr := newTracker(st)
+	tr := newTracker(st, "")
 	tr.observe(relaySnapshot("203.0.113.5"), nil, nil, map[string]string{"voxelport-relay": "active"})
 	tr.observe(relaySnapshot("203.0.113.5", "198.51.100.7"), nil, nil, map[string]string{"voxelport-relay": "active"})
 	tr.observe(map[string]any{"public_host": "play.example.test", "tunnels": []any{}, "names": []any{}}, nil, nil, map[string]string{"voxelport-relay": "failed"})
@@ -103,7 +103,7 @@ func TestTrackerRecordsSessionsWithoutIPs(t *testing.T) {
 
 func TestExportSessionsCSVIsFormulaSafe(t *testing.T) {
 	st := testStore(t)
-	tr := newTracker(st)
+	tr := newTracker(st, "")
 	tr.observe(relaySnapshot(), nil, nil, nil)
 	tr.observe(map[string]any{"public_host": "play.example.test", "tunnels": []any{}, "names": []any{}}, nil, nil, nil)
 	today := time.Now().In(st.loc).Format("2006-01-02")
