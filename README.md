@@ -192,6 +192,21 @@ stripped, lengths capped) and offensive words refused. Operators can hide an
 entry without a restart by adding its custom name, or the first 8+ hex
 characters of its token ID from the logs, to `<-data-dir>/hidden.txt`.
 
+### Supporters
+
+Hosts the operator wants to thank (people who tipped) can be marked in the
+dashboard ("Make supporter") or by adding their custom name, or the first 8+
+hex characters of their token ID, to `<-data-dir>/supporters.txt` (same format
+as `hidden.txt`; re-read every minute). A supporter gets: `"supporter": true`
+on their `/api/servers` entry (the website shows a badge) and a place at the
+top of that list; and their custom address is never released for disuse (free
+ones expire after 60 days unused). Nothing else changes: no extra capacity, and
+nothing is taken from free hosts. The operator API also has
+`{"action":"grant_name","id":"<id>","name":"vp"}`, which gives a host a 1–2
+character address (hosts can't claim those themselves; it replaces the address
+they have now, and fails if the name is taken). This adds no wire-protocol
+frames: existing apps are unaffected.
+
 ## Compatibility
 
 Every fix and limit added to this relay preserves this wire protocol exactly

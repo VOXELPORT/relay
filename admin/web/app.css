@@ -103,6 +103,7 @@ h2 { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: .01em; }
 .table .actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 .tag { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--surface-2); border: 1px solid var(--line); color: var(--ink-2); margin-left: 4px; }
 .tag.hidden-tag { color: var(--warn); border-color: var(--warn); }
+.tag.supporter-tag { color: var(--good, #2e7d32); border-color: var(--good, #2e7d32); }
 details.players summary { cursor: pointer; color: var(--ink-2); }
 details.players ul { margin: 6px 0 0; padding-left: 16px; }
 

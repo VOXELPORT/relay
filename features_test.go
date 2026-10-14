@@ -427,3 +427,198 @@ func clientIDFor(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hexEncode(sum[:])
 }
+
+func TestValidateShortName(t *testing.T) {
+	for _, ok := range []string{"a", "z9", "7", "vp"} {
+		if err := validateShortName(ok); err != nil {
+			t.Errorf("%q should be a valid short name: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "abc", "A", "a-", "-a", "a b", "n", "ns", "ë"} {
+		if err := validateShortName(bad); err == nil {
+			t.Errorf("%q should be rejected as a short name", bad)
+		}
+	}
+	// Ordinary claims still need three characters: only the operator hands out short ones.
+	if err := validateName("vp"); err == nil {
+		t.Error("a host must not be able to claim a 2-character name")
+	}
+}
+
+func TestSupportersAreBadgedAndPinnedFirst(t *testing.T) {
+	cfg, dir := featureConfig(t, newFakeDNS(), 27200, 27205)
+	cfg.Supporters = newHiddenList(filepath.Join(dir, "supporters.txt"))
+	srv, r := newFeatureServer(cfg)
+	defer srv.Close()
+
+	busy, _ := register(t, srv, "vp_busyAAAAAAAAAAAA", false)
+	quiet, _ := register(t, srv, "vp_quietAAAAAAAAAAA", false)
+	// Keep both connections referenced until the end: an unreferenced conn can be garbage-collected (closed) mid-test.
+	defer busy.Close()
+	defer quiet.Close()
+	writeMsg(t, busy, Msg{Type: "listing", Listing: &Listing{Title: "Busy SMP", Players: 15, MaxPlayers: 20}})
+	writeMsg(t, quiet, Msg{Type: "listing", Listing: &Listing{Title: "Quiet SMP", Players: 1, MaxPlayers: 20}})
+	writeMsg(t, quiet, Msg{Type: "claim_name", Name: "quiet-smp"})
+	readUntil(t, quiet, "name")
+
+	got := waitListed(t, srv, 2)
+	if len(got) != 2 || got[0].Title != "Busy SMP" || got[0].Supporter || got[1].Supporter {
+		t.Fatalf("by default the busiest server is first and nobody is badged: %+v", got)
+	}
+
+	// The operator thanks the quiet server (by its address): it gets a badge and moves to the top.
+	if err := r.adminDo(adminAction{Action: "supporter", Name: "quiet-smp"}); err != nil {
+		t.Fatal(err)
+	}
+	got = fetchServers(t, srv)
+	if got[0].Title != "Quiet SMP" || !got[0].Supporter || got[1].Title != "Busy SMP" || got[1].Supporter {
+		t.Fatalf("supporter should be badged and pinned first: %+v", got)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "supporters.txt")); !strings.Contains(string(b), "quiet-smp") {
+		t.Fatalf("supporters.txt should record it, got %q", b)
+	}
+
+	// Supporters don't get the free hosts' slots: the list is otherwise ordered as before.
+	if err := r.adminDo(adminAction{Action: "unsupporter", Name: "quiet-smp"}); err != nil {
+		t.Fatal(err)
+	}
+	got = fetchServers(t, srv)
+	if got[0].Title != "Busy SMP" || got[0].Supporter || got[1].Supporter {
+		t.Fatalf("badge should be gone: %+v", got)
+	}
+
+	// A supporter can also be named by client ID, and the dashboard state shows it.
+	var id string
+	r.mu.Lock()
+	for k, c := range r.clients {
+		if c.listing != nil && c.listing.Title == "Busy SMP" {
+			id = k
+		}
+	}
+	r.mu.Unlock()
+	if err := r.adminDo(adminAction{Action: "supporter", ID: id[:12]}); err != nil {
+		t.Fatal(err)
+	}
+	if got = fetchServers(t, srv); !got[0].Supporter || got[0].Title != "Busy SMP" {
+		t.Fatalf("supporter by id: %+v", got)
+	}
+	st := r.adminState()
+	if list, _ := st["supporters"].([]string); len(list) != 1 || list[0] != id[:12] {
+		t.Fatalf("state should list the supporter, got %+v", st["supporters"])
+	}
+	if err := r.adminDo(adminAction{Action: "supporter"}); err == nil {
+		t.Fatal("a supporter entry needs an id or a name")
+	}
+}
+
+func TestSupportersKeepTheirAddressWhenUnused(t *testing.T) {
+	dns := newFakeDNS()
+	cfg, dir := featureConfig(t, dns, 27210, 27211)
+	s := cfg.Names
+	sup := newHiddenList(filepath.Join(dir, "supporters.txt"))
+	if _, err := s.claim("aaaaaaaaaaaa", "plainone", 27210); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.claim("bbbbbbbbbbbb", "thankyou", 27211); err != nil {
+		t.Fatal(err)
+	}
+	if err := sup.set("thankyou", true); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	for _, e := range s.byName {
+		e.LastSeen = time.Now().Add(-100 * 24 * time.Hour)
+	}
+	s.mu.Unlock()
+	s.sweepExpiredKeeping(nameExpiry, func(string) bool { return false }, sup.has)
+	if _, ok := s.forClient("aaaaaaaaaaaa"); ok {
+		t.Fatal("an unused free address should still expire")
+	}
+	if _, ok := s.forClient("bbbbbbbbbbbb"); !ok {
+		t.Fatal("a supporter's address was expired")
+	}
+	// A nil list (supporters disabled) keeps nobody and must not panic.
+	var none *supporterList
+	if none.has("bbbbbbbbbbbb", "thankyou") {
+		t.Fatal("a nil supporter list matched")
+	}
+}
+
+func TestOperatorCanGrantAShortAddress(t *testing.T) {
+	dns := newFakeDNS()
+	cfg, _ := featureConfig(t, dns, 27215, 27217)
+	srv, r := newFeatureServer(cfg)
+	defer srv.Close()
+
+	host, port := register(t, srv, "vp_shortAAAAAAAAAAA", false)
+	defer host.Close()
+	writeMsg(t, host, Msg{Type: "claim_name", Name: "longer-name"})
+	readUntil(t, host, "name")
+	var id string
+	r.mu.Lock()
+	for k := range r.clients {
+		id = k
+	}
+	r.mu.Unlock()
+
+	// Hosts can't claim a short name themselves…
+	writeMsg(t, host, Msg{Type: "claim_name", Name: "vp"})
+	if m := readUntil(t, host, "name_error"); m.Message == "" {
+		t.Fatal("a 2-character claim from a host must be refused")
+	}
+	// …the operator can give one, replacing the old address, and the app is told.
+	if err := r.adminDo(adminAction{Action: "grant_name", ID: id[:12], Name: "vp"}); err != nil {
+		t.Fatal(err)
+	}
+	m := readUntil(t, host, "name")
+	if m.Name != "vp" || m.Address != "vp.example.test" {
+		t.Fatalf("host should be told its new address, got %+v", m)
+	}
+	if e, ok := cfg.Names.forClient(id); !ok || e.Name != "vp" || e.Port != port {
+		t.Fatalf("name store should now hold vp on port %d: %+v %v", port, e, ok)
+	}
+	if _, ok := cfg.Names.byName["longer-name"]; ok {
+		t.Fatal("the old address should have been replaced")
+	}
+
+	// Refused cases.
+	for _, a := range []adminAction{
+		{Action: "grant_name", ID: id[:12], Name: "abc"}, // not a short name
+		{Action: "grant_name", ID: id[:12], Name: "n"},   // reserved
+		{Action: "grant_name", Name: "q9"},               // no host given
+		{Action: "grant_name", ID: "ffffffffffff", Name: "q9"},
+	} {
+		if err := r.adminDo(a); err == nil {
+			t.Errorf("%+v should have been refused", a)
+		}
+	}
+	// A name someone else holds can't be taken.
+	other, _ := register(t, srv, "vp_otherAAAAAAAAAAA", false)
+	defer other.Close()
+	var otherID string
+	r.mu.Lock()
+	for k := range r.clients {
+		if k != id {
+			otherID = k
+		}
+	}
+	r.mu.Unlock()
+	if err := r.adminDo(adminAction{Action: "grant_name", ID: otherID[:12], Name: "vp"}); err == nil {
+		t.Fatal("a short name already in use must not be handed out twice")
+	}
+}
+
+// waitListed polls the public list until n servers show (the relay handles each host's frames
+// on its own goroutine, so a fixed sleep is flaky under load).
+func waitListed(t *testing.T, srv *httptest.Server, n int) []serverEntry {
+	t.Helper()
+	var got []serverEntry
+	for i := 0; i < 100; i++ {
+		if got = fetchServers(t, srv); len(got) == n {
+			return got
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	t.Fatalf("expected %d listed servers, last saw %+v", n, got)
+	return nil
+}

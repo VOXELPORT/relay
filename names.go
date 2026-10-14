@@ -89,6 +89,19 @@ func validateName(name string) error {
 	return nil
 }
 
+var shortNamePattern = regexp.MustCompile(`^[a-z0-9]{1,2}$`)
+
+// validateShortName checks a 1–2 character address, which only the operator can hand out.
+func validateShortName(name string) error {
+	if !shortNamePattern.MatchString(name) {
+		return errors.New("A short name is 1–2 lowercase letters or numbers.")
+	}
+	if reservedNames[name] {
+		return errors.New("That name is reserved.")
+	}
+	return nil
+}
+
 // dnsProvider publishes and removes the records behind a custom address.
 // record IDs are opaque to the store and kept so records can be updated or
 // deleted later.
@@ -239,8 +252,22 @@ func (s *nameStore) allowAttempt(clientID string) bool {
 // its live tunnel holds right now). A client has at most one name; claiming
 // a new one releases the old.
 func (s *nameStore) claim(clientID, name string, port int) (nameEntry, error) {
+	return s.claimName(clientID, name, port, false)
+}
+
+// grantShort gives clientID a 1–2 character address. Only the operator can do this
+// (the dashboard's "Short name" action); hosts can't claim one themselves.
+func (s *nameStore) grantShort(clientID, name string, port int) (nameEntry, error) {
+	return s.claimName(clientID, name, port, true)
+}
+
+func (s *nameStore) claimName(clientID, name string, port int, short bool) (nameEntry, error) {
 	name = strings.ToLower(strings.TrimSpace(name))
-	if err := validateName(name); err != nil {
+	check := validateName
+	if short {
+		check = validateShortName
+	}
+	if err := check(name); err != nil {
 		return nameEntry{}, err
 	}
 	if !s.allowAttempt(clientID) {
@@ -379,10 +406,16 @@ func (s *nameStore) touch(clientID string) {
 // sweepExpired releases names unused for longer than maxAge. isLive reports
 // whether a client currently has a tunnel up (those are never expired).
 func (s *nameStore) sweepExpired(maxAge time.Duration, isLive func(clientID string) bool) {
+	s.sweepExpiredKeeping(maxAge, isLive, nil)
+}
+
+// sweepExpiredKeeping is sweepExpired, except addresses for which keep(clientID, name)
+// is true are never expired (supporters' addresses). keep must not call back into s.
+func (s *nameStore) sweepExpiredKeeping(maxAge time.Duration, isLive func(clientID string) bool, keep func(clientID, name string) bool) {
 	s.mu.Lock()
 	var stale []string
 	for id, e := range s.byClient {
-		if time.Since(e.LastSeen) > maxAge && !isLive(id) {
+		if time.Since(e.LastSeen) > maxAge && !isLive(id) && (keep == nil || !keep(id, e.Name)) {
 			stale = append(stale, id)
 		}
 	}
@@ -396,11 +429,11 @@ func (s *nameStore) sweepExpired(maxAge time.Duration, isLive func(clientID stri
 
 func (r *relay) nameSweepLoop() {
 	for range time.Tick(nameExpirySweepTick) {
-		r.names.sweepExpired(nameExpiry, func(id string) bool {
+		r.names.sweepExpiredKeeping(nameExpiry, func(id string) bool {
 			r.mu.Lock()
 			defer r.mu.Unlock()
 			_, live := r.clients[id]
 			return live
-		})
+		}, r.supporters.has) // a supporter's address is kept even when they haven't hosted for a while
 	}
 }

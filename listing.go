@@ -149,6 +149,16 @@ func (h *hiddenList) hides(clientID, name string) bool {
 	return false
 }
 
+// supporterList is the same kind of operator file as hiddenList (one custom-address
+// name or client-ID prefix per line, in supporters.txt) naming hosts who support
+// VoxelPort. Their server is badged and pinned at the top of the public list, and
+// their custom address is never expired for disuse. Everything else is the same
+// for everyone: supporters get no extra capacity and nothing is taken from free hosts.
+type supporterList = hiddenList
+
+// has reports whether the host (by client ID or custom-address name) is a supporter.
+func (h *hiddenList) has(clientID, name string) bool { return h.hides(clientID, name) }
+
 type serverEntry struct {
 	Title       string `json:"title"`
 	Description string `json:"description,omitempty"`
@@ -161,6 +171,9 @@ type serverEntry struct {
 	BedrockHost string `json:"bedrock_host,omitempty"`
 	BedrockPort int    `json:"bedrock_port,omitempty"`
 	UptimeMin   int    `json:"uptime_minutes"`
+	// Supporter marks a host the operator has thanked for supporting VoxelPort; the list pins
+	// these first and the website labels them.
+	Supporter bool `json:"supporter,omitempty"`
 }
 
 // apiServers lists every live tunnel whose host opted into the public list.
@@ -192,6 +205,7 @@ func (r *relay) apiServers(w http.ResponseWriter, req *http.Request) {
 			Players: l.Players, MaxPlayers: l.MaxPlayers,
 			Address:   fmt.Sprintf("%s:%d", r.publicHost, c.publicPort),
 			UptimeMin: int(time.Since(c.startedAt).Minutes()),
+			Supporter: r.supporters.has(c.id, name),
 		}
 		host := r.publicHost
 		if name != "" {
@@ -204,6 +218,10 @@ func (r *relay) apiServers(w http.ResponseWriter, req *http.Request) {
 		entries = append(entries, e)
 	}
 	sort.Slice(entries, func(i, j int) bool {
+		// Supporters first (the website labels them), then busiest, then longest running.
+		if entries[i].Supporter != entries[j].Supporter {
+			return entries[i].Supporter
+		}
 		if entries[i].Players != entries[j].Players {
 			return entries[i].Players > entries[j].Players
 		}

@@ -71,7 +71,10 @@ function toast(msg, bad) {
   toast.timer = setTimeout(() => { t.hidden = true; }, 3200);
 }
 
-const ACTION_TEXT = { kick: 'Kicked', ban: 'Blocked', unban: 'Unblocked', hide: 'Hidden from the server list', unhide: 'Back on the server list', release_name: 'Address released' };
+const ACTION_TEXT = { kick: 'Kicked', ban: 'Blocked', unban: 'Unblocked', hide: 'Hidden from the server list', unhide: 'Back on the server list', release_name: 'Address released', supporter: 'Marked as a supporter', unsupporter: 'Supporter badge removed' };
+
+// A button that asks for a short address first (see grantShort).
+const grantBtn = (id, region) => `<button type="button" class="btn sm" data-grant="${esc(id)}" data-region="${esc(region)}">Short address…</button>`;
 
 // The relays the dashboard watches: India (this machine) and, when
 // configured, North America. Each server, address and session belongs to one.
@@ -109,7 +112,22 @@ function actBtn(action, id, label, opts = {}) {
   return `<button type="button" class="btn sm ${opts.danger ? 'danger' : ''} ${isArmed ? 'armed' : ''}" data-act="${esc(action)}" data-id="${esc(id)}" data-region="${esc(region)}">${isArmed ? `Confirm ${esc(label.toLowerCase())}?` : esc(label)}</button>`;
 }
 
+// Gives a supporter a 1–2 character address (replacing the one they have now).
+async function grantShort(id, region) {
+  const name = (prompt('Short address to give this host (1–2 letters or numbers, e.g. "vp").\nIt replaces their current address, and nobody else can claim it.') || '').trim().toLowerCase();
+  if (!name) return;
+  try {
+    await api('/api/action', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-VP-Admin': '1' }, body: JSON.stringify({ action: 'grant_name', id, name, region }) });
+    toast(`Gave them ${name}.voxelport.in`);
+  } catch (e) {
+    toast(e.message, true);
+  }
+  refresh();
+}
+
 document.addEventListener('click', (e) => {
+  const g = e.target.closest('[data-grant]');
+  if (g) { grantShort(g.dataset.grant, g.dataset.region); return; }
   const b = e.target.closest('[data-act]');
   if (b) act(b.dataset.act, b.dataset.id, b.dataset.region);
 });
@@ -299,7 +317,7 @@ function renderTunnels() {
         ? `<details class="players" data-key="${esc(key)}" ${openDetails.has(key) ? 'open' : ''}><summary class="num">${players}</summary><ul class="mono">${t.players.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></details>`
         : `<span class="num">${players}</span>`;
       return `<tr>
-        <td><div><b>${esc(title || addr)}</b>${regionTag(region)}${t.udp ? '<span class="tag">Bedrock</span>' : ''}${t.listing ? '<span class="tag">Listed</span>' : ''}${t.hidden ? '<span class="tag hidden-tag">Hidden</span>' : ''}</div>
+        <td><div><b>${esc(title || addr)}</b>${regionTag(region)}${t.udp ? '<span class="tag">Bedrock</span>' : ''}${t.listing ? '<span class="tag">Listed</span>' : ''}${t.hidden ? '<span class="tag hidden-tag">Hidden</span>' : ''}${t.supporter ? '<span class="tag supporter-tag">Supporter</span>' : ''}</div>
             <div class="muted mono">${esc(title ? addr : `port ${t.port}`)} · id ${esc(t.id)}</div></td>
         <td class="mono">${esc(t.source_ip)}</td>
         <td class="r">${esc(fmtDur((Date.now() - new Date(t.since)) / 1000))}</td>
@@ -307,6 +325,8 @@ function renderTunnels() {
         <td class="r num">${fmtBytes(t.bytes_in)} / ${fmtBytes(t.bytes_out)}</td>
         <td><div class="actions">
           ${t.listing ? actBtn(t.hidden ? 'unhide' : 'hide', t.id, t.hidden ? 'Unhide' : 'Hide listing', { region }) : ''}
+          ${actBtn(t.supporter ? 'unsupporter' : 'supporter', t.id, t.supporter ? 'Remove supporter' : 'Make supporter', { region })}
+          ${t.supporter ? grantBtn(t.id, region) : ''}
           ${t.name ? actBtn('release_name', t.id, 'Release address', { danger: true, region }) : ''}
           ${actBtn('kick', t.id, 'Kick', { danger: true, region })}
           ${actBtn('ban', t.id, 'Block', { danger: true, region })}
@@ -402,10 +422,13 @@ function renderNames() {
   if (!names.length) { el.innerHTML = '<tr><td class="empty">Nobody has claimed an address yet.</td></tr>'; return; }
   el.innerHTML = `<thead><tr><th>Address</th><th class="r">Port</th><th>Last used</th><th class="r"></th></tr></thead><tbody>` +
     names.map((n) => `<tr>
-      <td><span class="dot ${n.online ? 'good' : ''}" style="display:inline-block;margin-right:6px"></span><b>${esc(n.name)}</b>${regionTag(n.region)}<div class="muted mono">id ${esc(n.id)} · since ${esc(new Date(n.created).toLocaleDateString())}</div></td>
+      <td><span class="dot ${n.online ? 'good' : ''}" style="display:inline-block;margin-right:6px"></span><b>${esc(n.name)}</b>${regionTag(n.region)}${n.supporter ? '<span class="tag supporter-tag">Supporter</span>' : ''}<div class="muted mono">id ${esc(n.id)} · since ${esc(new Date(n.created).toLocaleDateString())}</div></td>
       <td class="r num">${n.port}</td>
-      <td>${n.online ? 'Online now' : esc(ago(n.last_seen))}</td>
-      <td><div class="actions">${actBtn('release_name', n.id, 'Release', { danger: true, region: n.region })}</div></td></tr>`).join('') + '</tbody>';
+      <td>${n.online ? 'Online now' : esc(ago(n.last_seen))}${n.supporter ? '<div class="muted">kept: never expires</div>' : ''}</td>
+      <td><div class="actions">
+        ${actBtn(n.supporter ? 'unsupporter' : 'supporter', n.id, n.supporter ? 'Remove supporter' : 'Make supporter', { region: n.region })}
+        ${n.supporter ? grantBtn(n.id, n.region) : ''}
+        ${actBtn('release_name', n.id, 'Release', { danger: true, region: n.region })}</div></td></tr>`).join('') + '</tbody>';
 }
 
 function meter(label, used, total, text) {
@@ -465,7 +488,8 @@ function renderModeration() {
   const list = (title, items, action, label, empty) => `<div class="mod-list"><h3>${esc(title)}</h3>${items.length
     ? items.map((e) => `<div class="mod-item"><span class="mono">${esc(e)}</span>${actBtn(action, e, label)}</div>`).join('')
     : `<div class="muted">${esc(empty)}</div>`}</div>`;
-  el.innerHTML = list('Hidden from the server list', union('hidden'), 'unhide', 'Unhide', 'Nothing hidden.') +
+  el.innerHTML = list('Supporters (badge, pinned, address kept)', union('supporters'), 'unsupporter', 'Remove', 'No supporters yet. Use "Make supporter" on a server or address above.') +
+    list('Hidden from the server list', union('hidden'), 'unhide', 'Unhide', 'Nothing hidden.') +
     list('Blocked apps', union('banned'), 'unban', 'Unblock', 'Nobody is blocked.');
 }
 
