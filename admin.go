@@ -143,15 +143,17 @@ type adminTunnel struct {
 	Peak        int       `json:"peak_players"`
 	Listing     *Listing  `json:"listing,omitempty"`
 	Hidden      bool      `json:"hidden"`
+	Supporter   bool      `json:"supporter"`
 }
 
 type adminName struct {
-	Name     string    `json:"name"`
-	ID       string    `json:"id"`
-	Port     int       `json:"port"`
-	Created  time.Time `json:"created"`
-	LastSeen time.Time `json:"last_seen"`
-	Online   bool      `json:"online"`
+	Name      string    `json:"name"`
+	ID        string    `json:"id"`
+	Port      int       `json:"port"`
+	Created   time.Time `json:"created"`
+	LastSeen  time.Time `json:"last_seen"`
+	Online    bool      `json:"online"`
+	Supporter bool      `json:"supporter"`
 }
 
 func (r *relay) adminState() map[string]any {
@@ -194,6 +196,7 @@ func (r *relay) adminState() map[string]any {
 			t.Name = r.names.nameFor(c.id)
 		}
 		t.Hidden = r.hidden.hides(c.id, t.Name)
+		t.Supporter = r.supporters.has(c.id, t.Name)
 		players += len(t.Players) + t.UDPSessions
 		liveIn += t.BytesIn
 		liveOut += t.BytesOut
@@ -205,12 +208,15 @@ func (r *relay) adminState() map[string]any {
 	names := []adminName{}
 	if r.names != nil {
 		for _, e := range r.names.list() {
-			names = append(names, adminName{Name: e.Name, ID: e.ClientID[:12], Port: e.Port, Created: e.Created, LastSeen: e.LastSeen, Online: online[e.ClientID]})
+			names = append(names, adminName{Name: e.Name, ID: e.ClientID[:12], Port: e.Port, Created: e.Created, LastSeen: e.LastSeen, Online: online[e.ClientID], Supporter: r.supporters.has(e.ClientID, e.Name)})
 		}
 	}
-	var hidden, banned []string
+	var hidden, banned, supporters []string
 	if r.hidden != nil {
 		hidden = append(hidden, r.hidden.current()...)
+	}
+	if r.supporters != nil {
+		supporters = append(supporters, r.supporters.current()...)
 	}
 	if r.banned != nil {
 		banned = r.banned.list()
@@ -236,6 +242,8 @@ func (r *relay) adminState() map[string]any {
 		"names":   names,
 		"hidden":  nonNil(hidden),
 		"banned":  nonNil(banned),
+		// Hosts thanked for supporting VoxelPort (see supporterList).
+		"supporters": nonNil(supporters),
 	}
 }
 
@@ -273,9 +281,9 @@ func (r *relay) fullClientID(prefix string) string {
 }
 
 type adminAction struct {
-	Action string `json:"action"` // kick | ban | unban | hide | unhide | release_name
-	ID     string `json:"id"`     // client-ID prefix (kick, ban, unban, hide, unhide, release_name)
-	Name   string `json:"name"`   // or a custom-address name (hide, unhide)
+	Action string `json:"action"` // kick | ban | unban | hide | unhide | supporter | unsupporter | grant_name | release_name
+	ID     string `json:"id"`     // client-ID prefix (kick, ban, unban, hide, unhide, supporter, unsupporter, grant_name, release_name)
+	Name   string `json:"name"`   // or a custom-address name (hide, unhide, supporter, unsupporter); the short name to give (grant_name)
 }
 
 func (r *relay) adminDo(a adminAction) error {
@@ -286,6 +294,9 @@ func (r *relay) adminDo(a adminAction) error {
 	}
 	switch a.Action {
 	case "kick":
+		if id == "" {
+			return errors.New("missing id") // an empty prefix would match any tunnel
+		}
 		c := r.findClient(id)
 		if c == nil {
 			return errors.New("that tunnel isn't online")
@@ -320,9 +331,57 @@ func (r *relay) adminDo(a adminAction) error {
 			return err
 		}
 		log.Printf("[admin] %s %s", a.Action, entry)
+	case "supporter", "unsupporter":
+		if r.supporters == nil {
+			return errors.New("supporters need -data-dir")
+		}
+		entry := name
+		if entry == "" {
+			entry = id
+		}
+		if entry == "" {
+			return errors.New("missing id or name")
+		}
+		if err := r.supporters.set(entry, a.Action == "supporter"); err != nil {
+			return err
+		}
+		log.Printf("[admin] %s %s", a.Action, entry)
+	case "grant_name":
+		// Gives a supporter a 1–2 character address (replacing any address they have now).
+		if r.names == nil {
+			return errors.New("custom addresses are disabled")
+		}
+		if id == "" {
+			return errors.New("missing id")
+		}
+		full := r.fullClientID(id)
+		if full == "" {
+			return errors.New("no host with that id")
+		}
+		// The address points at the host's public port: its live one, or the one it already reserves.
+		port := 0
+		if c := r.findClient(id); c != nil {
+			port = c.publicPort
+		} else if e, ok := r.names.forClient(full); ok {
+			port = e.Port
+		}
+		if port == 0 {
+			return errors.New("that host isn't online and has no address yet")
+		}
+		e, err := r.names.grantShort(full, name, port)
+		if err != nil {
+			return err
+		}
+		if c := r.findClient(id); c != nil {
+			c.send(Msg{Type: "name", Name: e.Name, Address: r.names.address(e.Name)})
+		}
+		log.Printf("[admin] granted short address %s to %s…", e.Name, full[:8])
 	case "release_name":
 		if r.names == nil {
 			return errors.New("custom addresses are disabled")
+		}
+		if id == "" {
+			return errors.New("missing id")
 		}
 		full := r.fullClientID(id)
 		if full == "" {

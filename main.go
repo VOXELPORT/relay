@@ -59,8 +59,10 @@ func main() {
 
 	var names *nameStore
 	var hidden *hiddenList
+	var supporters *supporterList
 	if *dataDir != "" {
 		hidden = newHiddenList(filepath.Join(*dataDir, "hidden.txt"))
+		supporters = newHiddenList(filepath.Join(*dataDir, "supporters.txt"))
 		if token := os.Getenv("CF_DNS_API_TOKEN"); token != "" {
 			names, err = loadNameStore(filepath.Join(*dataDir, "names.json"), *dnsZone, newCloudflareDNS(token, *dnsZone, *publicHost))
 			if err != nil {
@@ -82,6 +84,7 @@ func main() {
 		Names:                 names,
 		PublicHost:            *publicHost,
 		Hidden:                hidden,
+		Supporters:            supporters,
 	})
 	if names != nil {
 		go r.nameSweepLoop()

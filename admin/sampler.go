@@ -55,14 +55,14 @@ func (u *upstreams) get(base, path string) (map[string]any, error) {
 	return out, nil
 }
 
-// action runs an operator action. Blocks and server-list hiding are lists
-// every relay keeps, so they go to all regions; kick and release_name go to
+// action runs an operator action. Blocks, server-list hiding and supporters are lists
+// every relay keeps, so they go to all regions; kick, release_name and grant_name go to
 // the region the server is on ("region" in the body, India by default).
 func (u *upstreams) action(body []byte) (int, map[string]any) {
 	var a struct{ Action, Region string }
 	json.Unmarshal(body, &a)
 	switch a.Action {
-	case "ban", "unban", "hide", "unhide":
+	case "ban", "unban", "hide", "unhide", "supporter", "unsupporter":
 		code, out := u.actionOn(u.relay, body)
 		if u.relayNA != "" {
 			if c2, out2 := u.actionOn(u.relayNA, body); c2 != http.StatusOK && code == http.StatusOK {

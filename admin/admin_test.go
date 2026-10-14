@@ -89,11 +89,14 @@ func TestActionRouting(t *testing.T) {
 	u := &upstreams{relay: in.URL, relayNA: na.URL, token: "x", client: http.DefaultClient}
 
 	for body, want := range map[string][2]int{
-		`{"action":"ban","id":"abcdef12"}`:                {1, 1},
-		`{"action":"unhide","name":"steve"}`:              {1, 1},
-		`{"action":"kick","id":"abcdef12","region":"na"}`: {0, 1},
-		`{"action":"release_name","id":"abcdef12"}`:       {1, 0},
-		`{"action":"kick","id":"abcdef12","region":"in"}`: {1, 0},
+		`{"action":"ban","id":"abcdef12"}`:                    {1, 1},
+		`{"action":"unhide","name":"steve"}`:                  {1, 1},
+		`{"action":"supporter","name":"steve"}`:               {1, 1},
+		`{"action":"unsupporter","id":"abcdef12"}`:            {1, 1},
+		`{"action":"grant_name","id":"abcdef12","name":"vp"}`: {1, 0},
+		`{"action":"kick","id":"abcdef12","region":"na"}`:     {0, 1},
+		`{"action":"release_name","id":"abcdef12"}`:           {1, 0},
+		`{"action":"kick","id":"abcdef12","region":"in"}`:     {1, 0},
 	} {
 		hits = map[string][]string{}
 		if code, _ := u.action([]byte(body)); code != http.StatusOK {

@@ -286,6 +286,9 @@ type relay struct {
 	names      *nameStore
 	publicHost string
 	hidden     *hiddenList
+	// supporters lists hosts the operator has thanked (badge, pinned in the list,
+	// address kept); nil-safe, so it simply matches nobody when unset.
+	supporters *supporterList
 
 	// Operator API (admin.go): bans, and lifetime totals that survive
 	// tunnels closing. banned is nil unless the API runs with -data-dir.
@@ -324,6 +327,7 @@ type relayConfig struct {
 	Names      *nameStore
 	PublicHost string
 	Hidden     *hiddenList
+	Supporters *supporterList
 
 	// Zero means "use the production default" — only tests need to set these.
 	InitialPlayerTimeout time.Duration
@@ -356,6 +360,7 @@ func newRelay(cfg relayConfig) *relay {
 		names:                 cfg.Names,
 		publicHost:            cfg.PublicHost,
 		hidden:                cfg.Hidden,
+		supporters:            cfg.Supporters,
 		startedAt:             time.Now(),
 	}
 	if r.publicHost == "" {
