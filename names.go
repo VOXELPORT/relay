@@ -119,6 +119,9 @@ type nameEntry struct {
 	Records  []string  `json:"records"`
 	Created  time.Time `json:"created"`
 	LastSeen time.Time `json:"last_seen"`
+	// Granted marks an address the operator gave this host (a supporter's short address). A host's
+	// own claim can't replace it, so an app that still remembers an older address can't undo it.
+	Granted bool `json:"granted,omitempty"`
 }
 
 type nameStore struct {
@@ -160,8 +163,16 @@ func loadNameStore(path, domain string, dns dnsProvider) (*nameStore, error) {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	for _, e := range entries {
-		if e == nil || validateName(e.Name) != nil || e.ClientID == "" || e.Port <= 0 {
+		if e == nil || e.ClientID == "" || e.Port <= 0 {
 			continue
+		}
+		// 1–2 character addresses can only come from the operator (grant_name), so they are kept
+		// (and marked as granted, which older saves didn't record) rather than dropped as invalid.
+		if validateName(e.Name) != nil {
+			if validateShortName(e.Name) != nil {
+				continue
+			}
+			e.Granted = true
 		}
 		s.index(e)
 	}
@@ -267,10 +278,18 @@ func (s *nameStore) claimName(clientID, name string, port int, short bool) (name
 	if short {
 		check = validateShortName
 	}
-	if err := check(name); err != nil {
-		return nameEntry{}, err
+	// An address the host already holds is always fine to "claim" again (apps re-send it on every
+	// start), even a short one that an ordinary claim couldn't make.
+	s.mu.Lock()
+	own := s.byClient[clientID]
+	s.mu.Unlock()
+	if own == nil || own.Name != name {
+		if err := check(name); err != nil {
+			return nameEntry{}, err
+		}
 	}
-	if !s.allowAttempt(clientID) {
+	// The host's own claim attempts are rate-limited; the operator's grants are not.
+	if !short && !s.allowAttempt(clientID) {
 		return nameEntry{}, errors.New("Too many tries — wait a few minutes and try again.")
 	}
 
@@ -286,6 +305,9 @@ func (s *nameStore) claimName(clientID, name string, port int, short bool) (name
 
 	if existing != nil && existing.ClientID != clientID {
 		return nameEntry{}, errors.New("That name is taken — try another.")
+	}
+	if !short && old != nil && old.Granted && old.Name != name {
+		return nameEntry{}, errors.New("Your address was set for you by VoxelPort (a supporter perk), so it can't be replaced. Remove it first if you'd like a different one.")
 	}
 	if existing != nil { // already ours
 		if existing.Port != port {
@@ -321,7 +343,7 @@ func (s *nameStore) claimName(clientID, name string, port int, short bool) (name
 	}
 
 	now := time.Now()
-	e := &nameEntry{Name: name, ClientID: clientID, Port: port, Records: records, Created: now, LastSeen: now}
+	e := &nameEntry{Name: name, ClientID: clientID, Port: port, Records: records, Created: now, LastSeen: now, Granted: short}
 	s.mu.Lock()
 	if old != nil {
 		s.unindex(old)

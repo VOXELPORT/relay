@@ -622,3 +622,87 @@ func waitListed(t *testing.T, srv *httptest.Server, n int) []serverEntry {
 	t.Fatalf("expected %d listed servers, last saw %+v", n, got)
 	return nil
 }
+
+func TestGrantedAddressSurvivesAnAppThatRemembersAnOlderOne(t *testing.T) {
+	dns := newFakeDNS()
+	cfg, dir := featureConfig(t, dns, 27220, 27223)
+	s := cfg.Names
+	const id = "aaaaaaaaaaaa"
+	if _, err := s.claim(id, "phone", 27220); err != nil {
+		t.Fatal(err)
+	}
+	// The operator gives the host a short address in place of "phone".
+	if e, err := s.grantShort(id, "gg", 27220); err != nil || !e.Granted {
+		t.Fatalf("grant failed or wasn't marked granted: %+v %v", e, err)
+	}
+	if _, ok := s.byName["phone"]; ok {
+		t.Fatal("the old address should be gone")
+	}
+
+	// The app still remembers "phone" and asks for it again on every start. That must NOT undo the grant.
+	if _, err := s.claim(id, "phone", 27220); err == nil || !strings.Contains(err.Error(), "set for you") {
+		t.Fatalf("a host must not be able to replace a granted address, got %v", err)
+	}
+	if got := s.nameFor(id); got != "gg" {
+		t.Fatalf("address changed to %q", got)
+	}
+
+	// Asking for the address it already holds is fine, even though an ordinary claim can't be 2 characters.
+	if e, err := s.claim(id, "gg", 27220); err != nil || e.Name != "gg" {
+		t.Fatalf("re-claiming its own short address should work: %+v %v", e, err)
+	}
+	// ...and a different host still can't take it, or make a short one.
+	if _, err := s.claim("bbbbbbbbbbbb", "gg", 27221); err == nil {
+		t.Fatal("another host claimed a short address")
+	}
+
+	// The operator can still change it, and the host can give it up on purpose.
+	if e, err := s.grantShort(id, "hh", 27220); err != nil || e.Name != "hh" {
+		t.Fatalf("operator re-grant: %+v %v", e, err)
+	}
+	// It survives a restart of the relay.
+	reloaded, err := loadNameStore(filepath.Join(dir, "names.json"), "example.test", dns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e, ok := reloaded.forClient(id); !ok || e.Name != "hh" || !e.Granted {
+		t.Fatalf("granted flag not persisted: %+v %v", e, ok)
+	}
+	if err := s.release(id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.claim(id, "phone", 27220); err != nil {
+		t.Fatalf("after giving up the granted address the host can claim a normal one: %v", err)
+	}
+	if e, _ := s.forClient(id); e.Granted {
+		t.Fatal("an ordinary claim must not be marked granted")
+	}
+}
+
+func TestShortAddressesFromAnOlderSaveAreKeptOnStartup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "names.json")
+	// A save written before the "granted" flag existed: one short address (operator-made), one ordinary, one junk.
+	os.WriteFile(path, []byte(`[
+	  {"name":"gg","client_id":"aaaaaaaaaaaa","port":27230,"records":["c1","s1"]},
+	  {"name":"mysmp","client_id":"bbbbbbbbbbbb","port":27231,"records":["c2","s2"]},
+	  {"name":"-bad-","client_id":"cccccccccccc","port":27232,"records":[]},
+	  {"name":"abc","client_id":"","port":27233,"records":[]}
+	]`), 0o600)
+	s, err := loadNameStore(path, "example.test", newFakeDNS())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e, ok := s.forClient("aaaaaaaaaaaa"); !ok || e.Name != "gg" || !e.Granted {
+		t.Fatalf("short address lost or not marked granted: %+v %v", e, ok)
+	}
+	if e, ok := s.forClient("bbbbbbbbbbbb"); !ok || e.Name != "mysmp" || e.Granted {
+		t.Fatalf("ordinary address wrong: %+v %v", e, ok)
+	}
+	if _, ok := s.forClient("cccccccccccc"); ok {
+		t.Fatal("an invalid name was kept")
+	}
+	if len(s.byName) != 2 {
+		t.Fatalf("expected 2 addresses, got %d", len(s.byName))
+	}
+}
