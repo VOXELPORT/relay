@@ -179,6 +179,30 @@ infrastructure names and offensive words are refused, existing DNS records are
 never overwritten, and claims are rate-limited. State lives in
 `<-data-dir>/names.json`; without `-data-dir` and the token, the feature is off.
 
+### Direct mode
+
+Lets a host's players skip the relay when the host opened a port on its router (UPnP).
+
+| Direction      | Frame |
+|----------------|-------|
+| host → relay   | `{"type":"direct","port":25565}` asks for it; `{"type":"direct","port":0}` turns it off. Apps send it again after every reconnect. |
+| relay → host   | `{"type":"direct","ip":"83.45.12.9","port":25565,"address":"steve.voxelport.in"}` — it works (`address` only if the host has a custom address) |
+| relay → host   | `{"type":"direct","port":0}` — players use the relay again |
+| relay → host   | `{"type":"direct_error","message":"..."}` — refused, or stopped working |
+
+The relay never takes an address from the host: it uses the IP the tunnel connected from, and only a public IPv4 address
+is accepted (not private, shared/CGNAT, loopback or reserved ranges, and not IPv6). It connects there and asks for the
+Minecraft server-list status; only a real Minecraft answer counts. Then, for a host with a custom address, the SRV record
+is pointed at an A record `<name>--d` (a label no claim can collide with, since names can't contain `--`) with the host's
+IP and port, with a 60-second TTL. A host that stops answering two checks in a row (every 45 s) is put back on the relay and
+told; it resumes by itself. A host that turns it off, disconnects or is replaced goes back at once and its IP leaves DNS
+(retried if DNS fails, and never undoing a newer session of the same host). Addresses a relay restart left pointing at a
+host are put back two minutes after start.
+
+The host's IP address is public in DNS while this is on (the host opted in and was told), but it is never logged and never
+written to disk: `names.json` only records `"direct": true`. Each host may ask 6 times per 10 minutes. The operator API's
+tunnel list shows only whether a tunnel is direct.
+
 ### Public server list
 
 | Direction      | Frame |
