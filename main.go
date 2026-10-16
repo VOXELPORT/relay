@@ -88,6 +88,7 @@ func main() {
 	})
 	if names != nil {
 		go r.nameSweepLoop()
+		r.startDirectCleanup()
 	}
 	r.startAdmin(*adminAddr, os.Getenv("VOXELPORT_ADMIN_TOKEN"), *dataDir)
 	if *secret != "" {

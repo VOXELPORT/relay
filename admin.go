@@ -136,6 +136,7 @@ type adminTunnel struct {
 	Since       time.Time `json:"since"`
 	Players     []string  `json:"players"`
 	UDP         bool      `json:"udp"`
+	Direct      bool      `json:"direct,omitempty"` // players are connecting straight to the host (Direct mode)
 	UDPSessions int       `json:"udp_sessions"`
 	BytesIn     int64     `json:"bytes_in"`
 	BytesOut    int64     `json:"bytes_out"`
@@ -175,6 +176,9 @@ func (r *relay) adminState() map[string]any {
 			ID: c.id[:12], Port: c.publicPort, SourceIP: c.sourceIP, Since: c.startedAt,
 			BytesIn: c.bytesIn.Load(), BytesOut: c.bytesOut.Load(), Conns: c.totalConns.Load(),
 			UDP: c.udp != nil, Players: []string{},
+		}
+		if st := c.directState(); st != nil {
+			t.Direct = st.isLive() // whether, never the host's address
 		}
 		c.mu.Lock()
 		for _, pc := range c.players {

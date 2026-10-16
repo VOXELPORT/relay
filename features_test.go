@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -26,10 +27,22 @@ type fakeDNS struct {
 	ports    map[string]int  // srv record id -> port
 	deleted  []string
 	next     int
+
+	// Direct mode: where each SRV record sends players now, and the A records that exist.
+	direct     map[string]directRec
+	aRecords   map[string]bool
+	failSet    int           // the next SetDirect calls fail
+	failClear  int           // the next ClearDirect calls fail
+	clearDelay time.Duration // how long ClearDirect takes (to widen races)
+}
+
+type directRec struct {
+	ip   string
+	port int
 }
 
 func newFakeDNS() *fakeDNS {
-	return &fakeDNS{existing: map[string]bool{}, ports: map[string]int{}}
+	return &fakeDNS{existing: map[string]bool{}, ports: map[string]int{}, direct: map[string]directRec{}, aRecords: map[string]bool{}}
 }
 
 func (f *fakeDNS) Exists(_ context.Context, name string) (bool, error) {
@@ -60,8 +73,60 @@ func (f *fakeDNS) Delete(_ context.Context, records []string) error {
 	f.deleted = append(f.deleted, records...)
 	for _, id := range records {
 		delete(f.ports, id)
+		delete(f.direct, id)
+		delete(f.aRecords, id)
 	}
 	return nil
+}
+
+func (f *fakeDNS) SetDirect(_ context.Context, records []string, _ string, ip string, port int) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failSet > 0 {
+		f.failSet--
+		return nil, errors.New("dns is down")
+	}
+	a := ""
+	if len(records) >= 3 {
+		a = records[2]
+	}
+	if a == "" {
+		f.next++
+		a = fmt.Sprintf("a-%d", f.next)
+	}
+	f.aRecords[a] = true
+	f.direct[records[1]] = directRec{ip, port}
+	return []string{records[0], records[1], a}, nil
+}
+
+func (f *fakeDNS) ClearDirect(_ context.Context, records []string, _ string, relayPort int) ([]string, error) {
+	time.Sleep(f.clearDelay)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failClear > 0 {
+		f.failClear--
+		return nil, errors.New("dns is down")
+	}
+	delete(f.direct, records[1])
+	if len(records) >= 3 {
+		delete(f.aRecords, records[2])
+	}
+	f.ports[records[1]] = relayPort
+	return records[:2], nil
+}
+
+// pointsAt reports where the SRV record sends players when it points straight at a host.
+func (f *fakeDNS) pointsAt(srv string) (directRec, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r, ok := f.direct[srv]
+	return r, ok
+}
+
+func (f *fakeDNS) hasA() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.aRecords) > 0
 }
 
 func featureConfig(t *testing.T, dns *fakeDNS, minPort, maxPort int) (relayConfig, string) {

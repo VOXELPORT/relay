@@ -110,6 +110,11 @@ type dnsProvider interface {
 	Create(ctx context.Context, name string, port int) ([]string, error)
 	Repoint(ctx context.Context, records []string, name string, port int) error
 	Delete(ctx context.Context, records []string) error
+	// SetDirect points the address straight at a host's own IP and port (Direct mode); the returned
+	// records are the old ones plus the new A record. ClearDirect points it back at the relay port
+	// and removes that A record.
+	SetDirect(ctx context.Context, records []string, name, ip string, port int) ([]string, error)
+	ClearDirect(ctx context.Context, records []string, name string, relayPort int) ([]string, error)
 }
 
 type nameEntry struct {
@@ -122,6 +127,10 @@ type nameEntry struct {
 	// Granted marks an address the operator gave this host (a supporter's short address). A host's
 	// own claim can't replace it, so an app that still remembers an older address can't undo it.
 	Granted bool `json:"granted,omitempty"`
+	// Direct is true while the address points straight at the host instead of the relay (Direct
+	// mode). Only the fact is saved, never the host's IP address: it is kept so records left behind
+	// by a relay restart can be cleaned up.
+	Direct bool `json:"direct,omitempty"`
 }
 
 type nameStore struct {
@@ -311,9 +320,12 @@ func (s *nameStore) claimName(clientID, name string, port int, short bool) (name
 	}
 	if existing != nil { // already ours
 		if existing.Port != port {
-			if err := s.dns.Repoint(ctx, existing.Records, name, port); err != nil {
-				log.Printf("[names] repoint %s: %v", name, err)
-				return nameEntry{}, errors.New("Couldn't update your address right now — try again shortly.")
+			// While the address points straight at the host, only the remembered relay port changes.
+			if !existing.Direct {
+				if err := s.dns.Repoint(ctx, existing.Records, name, port); err != nil {
+					log.Printf("[names] repoint %s: %v", name, err)
+					return nameEntry{}, errors.New("Couldn't update your address right now — try again shortly.")
+				}
 			}
 			s.mu.Lock()
 			s.unindex(existing)
@@ -401,9 +413,11 @@ func (s *nameStore) repoint(clientID string, port int) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), nameDNSTimeout)
 	defer cancel()
-	if err := s.dns.Repoint(ctx, e.Records, e.Name, port); err != nil {
-		log.Printf("[names] repoint %s: %v", e.Name, err)
-		return
+	if !e.Direct {
+		if err := s.dns.Repoint(ctx, e.Records, e.Name, port); err != nil {
+			log.Printf("[names] repoint %s: %v", e.Name, err)
+			return
+		}
 	}
 	s.mu.Lock()
 	s.unindex(e)

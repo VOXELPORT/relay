@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -24,12 +25,16 @@ import (
 // Msg is the single wire envelope exchanged with a host client (mod or app).
 //
 // Client -> relay: register{token, client?, blocked_ips[], udp}, data{conn, data}, close{conn}, ping,
-// udp{conn, data}, udp_close{conn}, claim_name{name}, release_name, listing{listing?}.
+// udp{conn, data}, udp_close{conn}, claim_name{name}, release_name, listing{listing?},
+// direct{port} (Direct mode: players connect straight to the host's own IP and port, port 0 turns it off).
 //
 // Relay -> client: port{port} | error{message}, connect{conn, ip}, data{conn, data}, close{conn}, pong,
 // udp{conn, ip?, data}, udp_close{conn}, udp_error{message}, name{name, address},
 // name_error{message}, listing_error{message}, notice{message, seconds} (an announcement from the
-// operator, such as "relay restarting in 10 minutes"; an empty message clears it).
+// operator, such as "relay restarting in 10 minutes"; an empty message clears it),
+// direct{ip, port, address?} (Direct mode is on: the relay reached the host at ip:port, and address, if the
+// host has a custom address, now points straight at it; port 0 means players use the relay again),
+// direct_error{message} (Direct mode was refused or stopped working).
 //
 // The udp, name and listing frames are additive: an older client never
 // sends udp/claim_name/listing and never receives udp, name or listing frames
@@ -259,6 +264,10 @@ type client struct {
 	blocked   map[string]bool
 	closeOnce sync.Once
 
+	direct     *directState  // Direct mode (guarded by mu); nil unless the host turned it on and it was verified
+	directAsks []time.Time    // when the host last asked for Direct mode (guarded by mu), to rate-limit it
+	closed     chan struct{} // closed when the tunnel is torn down
+
 	udp     *udpState // non-nil when the host asked for Bedrock (UDP) forwarding
 	listing *Listing  // public server-list entry, nil unless the host opted in (guarded by mu)
 
@@ -371,6 +380,14 @@ type relay struct {
 
 	noticeMu sync.Mutex
 	notice   *operatorNotice // the current announcement to hosts, nil when there is none
+
+	// Direct mode (direct.go). Tests replace these; production leaves them nil / zero.
+	directAllowIP func(ip string) bool
+	directProbeFn func(ctx context.Context, ip string, port int) error
+	directEvery   time.Duration
+	directRetry   time.Duration
+	directCleanup time.Duration
+	directWG      sync.WaitGroup // Direct mode work running in the background (waited for in tests)
 }
 
 // operatorNotice is an announcement the operator sent to every host: "relay restarting in 10 minutes".
@@ -910,6 +927,7 @@ func (r *relay) handleWS(w http.ResponseWriter, req *http.Request) {
 		startedAt:  time.Now(),
 		name:       clientName,
 		route:      route,
+		closed:     make(chan struct{}),
 	}
 	for _, blockedIP := range reg.BlockedIPs {
 		c.blocked[blockedIP] = true
@@ -1064,6 +1082,7 @@ func (r *relay) handleClientMsg(c *client, m Msg) {
 				return
 			}
 			c.send(Msg{Type: "name", Name: e.Name, Address: r.names.address(e.Name)})
+			r.refreshDirect(c)
 		}()
 
 	case "release_name":
@@ -1076,7 +1095,13 @@ func (r *relay) handleClientMsg(c *client, m Msg) {
 				return
 			}
 			c.send(Msg{Type: "name"})
+			r.refreshDirect(c)
 		}()
+
+	case "direct":
+		// Direct mode: the host opened a port on its router and wants players to skip the relay.
+		// Port 0 turns it off. Verifying takes seconds, so it never blocks this tunnel.
+		r.background(func() { r.handleDirect(c, m.Port) })
 
 	case "listing":
 		if m.Listing == nil {
@@ -1202,6 +1227,10 @@ func (c *client) close(r *relay) {
 		if c.udp != nil {
 			c.udp.close()
 		}
+		if c.closed != nil {
+			close(c.closed)
+		}
+		r.stopDirect(c) // players of a stopped host go back to the relay, and its IP leaves DNS
 		c.ws.Close()
 		r.releasePort(c.publicPort)
 		r.removeTunnel(c.sourceIP)
