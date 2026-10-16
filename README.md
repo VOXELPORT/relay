@@ -203,6 +203,26 @@ The host's IP address is public in DNS while this is on (the host opted in and w
 written to disk: `names.json` only records `"direct": true`. Each host may ask 6 times per 10 minutes. The operator API's
 tunnel list shows only whether a tunnel is direct.
 
+### Join codes (peer-to-peer)
+
+A host can let players connect to it directly, peer-to-peer, with a code; the relay only introduces them.
+
+| Direction       | Frame |
+|-----------------|-------|
+| host → relay    | `{"type":"p2p","p2p":true}` turns join codes on (`false` off); `{"type":"p2p_rotate"}` makes a new code; `{"type":"peer_signal","peer":"…","signal":"…"}` answers a player; `{"type":"peer_close","peer":"…"}` drops one |
+| relay → host    | `{"type":"join_code","code":"K7M2Q-9XH4T"}` (empty when off; sent after every change); `{"type":"peer","peer":"…","client":"desktop/1.9.0"}` a player is waiting; `{"type":"peer_signal",…}` from that player; `{"type":"peer_gone","peer":"…"}`; `{"type":"join_error","message":"…"}` |
+| player → `/join` | `{"type":"join","code":"…","client":"…"}` first, then `{"type":"signal","signal":"…"}`, `ping`, `leave` |
+| `/join` → player | `{"type":"joined","peer":"…","address":"play.voxelport.in","port":26043}` (the host's ordinary relay address, a fallback), `{"type":"signal","signal":"…"}`, `pong`, `{"type":"join_error","message":"…"}` |
+
+The signals are WebRTC offers, answers and network candidates (at most 8 KiB each); the relay never looks inside them and no game
+traffic touches it. A code is 10 characters of Crockford base32 (shown XXXXX-XXXXX, 50 bits), derived with HMAC-SHA256 from a key in
+`-data-dir` (`join.key`) and the host's id plus how many times the host rotated it (`join-epochs.json`), so it is stable across
+sessions and restarts and a rotation revokes the old one at once. It only works while the host is online with join codes on. Wrong
+codes are limited to 10 per address per 10 minutes; each address may hold 4 `/join` connections, each host 16 waiting players,
+and a player 200 setup messages a minute; a `/join` connection ends when idle for 90 s or after 10 minutes. Waiting players are
+told when the host leaves, turns codes off or rotates. Codes and IP addresses are never logged; only the key and the rotation counts
+are saved. Without `-data-dir` the key lives in memory, so codes change on restart.
+
 ### Public server list
 
 | Direction      | Frame |
