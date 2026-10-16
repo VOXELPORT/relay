@@ -58,6 +58,12 @@ type Msg struct {
 	Client string `json:"client,omitempty"`
 	// Seconds is how long until what a "notice" announces happens (0 = now, or no time given).
 	Seconds int `json:"seconds,omitempty"`
+	// Join codes (join.go): Code is shown to the host and typed by a player; Peer names one player waiting to
+	// connect; Signal is a WebRTC setup message passed between them; P2P turns join codes on or off.
+	Code   string `json:"code,omitempty"`
+	Peer   string `json:"peer,omitempty"`
+	Signal string `json:"signal,omitempty"`
+	P2P    *bool  `json:"p2p,omitempty"`
 }
 
 // tokenPattern accepts the auto-generated device tokens produced by the mod/app.
@@ -264,6 +270,7 @@ type client struct {
 	blocked   map[string]bool
 	closeOnce sync.Once
 
+	peers      map[string]*joiner // players waiting to connect peer-to-peer (join.go; guarded by mu)
 	direct     *directState  // Direct mode (guarded by mu); nil unless the host turned it on and it was verified
 	directAsks []time.Time    // when the host last asked for Direct mode (guarded by mu), to rate-limit it
 	closed     chan struct{} // closed when the tunnel is torn down
@@ -363,6 +370,7 @@ type relay struct {
 	// publicHost is the hostname players use with a port (play.voxelport.in);
 	// hidden lists server-list entries an operator has taken down.
 	names      *nameStore
+	join       *joinHub // join codes for peer-to-peer connections; nil = off
 	publicHost string
 	hidden     *hiddenList
 	// supporters lists hosts the operator has thanked (badge, pinned in the list,
@@ -528,6 +536,7 @@ type relayConfig struct {
 	TrustedProxies        []*net.IPNet
 
 	Names      *nameStore
+	Join       *joinHub
 	PublicHost string
 	Hidden     *hiddenList
 	Supporters *supporterList
@@ -561,6 +570,7 @@ func newRelay(cfg relayConfig) *relay {
 		idlePlayerTimeout:     idleTimeout,
 		regLimiter:            newRegLimiter(),
 		names:                 cfg.Names,
+		join:                  cfg.Join,
 		publicHost:            cfg.PublicHost,
 		hidden:                cfg.Hidden,
 		supporters:            cfg.Supporters,
@@ -928,6 +938,7 @@ func (r *relay) handleWS(w http.ResponseWriter, req *http.Request) {
 		name:       clientName,
 		route:      route,
 		closed:     make(chan struct{}),
+		peers:      make(map[string]*joiner),
 	}
 	for _, blockedIP := range reg.BlockedIPs {
 		c.blocked[blockedIP] = true
@@ -1098,6 +1109,10 @@ func (r *relay) handleClientMsg(c *client, m Msg) {
 			r.refreshDirect(c)
 		}()
 
+	case "p2p", "p2p_rotate", "peer_signal", "peer_close":
+		// Join codes: a host lets players connect to it peer-to-peer (join.go).
+		r.handleHostP2P(c, m)
+
 	case "direct":
 		// Direct mode: the host opened a port on its router and wants players to skip the relay.
 		// Port 0 turns it off. Verifying takes seconds, so it never blocks this tunnel.
@@ -1231,6 +1246,7 @@ func (c *client) close(r *relay) {
 			close(c.closed)
 		}
 		r.stopDirect(c) // players of a stopped host go back to the relay, and its IP leaves DNS
+		r.hostGone(c)   // its join code stops working and players waiting to connect are told
 		c.ws.Close()
 		r.releasePort(c.publicPort)
 		r.removeTunnel(c.sourceIP)

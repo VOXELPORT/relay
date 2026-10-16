@@ -58,6 +58,7 @@ func main() {
 	}
 
 	var names *nameStore
+	var join *joinHub
 	var hidden *hiddenList
 	var supporters *supporterList
 	if *dataDir != "" {
@@ -74,6 +75,11 @@ func main() {
 		}
 	}
 
+	join, err = newJoinHub(*dataDir) // join codes for peer-to-peer; the key and rotation counts live in -data-dir
+	if err != nil {
+		log.Fatalf("join codes: %v", err)
+	}
+
 	r := newRelay(relayConfig{
 		MinPort:               *minPort,
 		MaxPort:               *maxPort,
@@ -82,6 +88,7 @@ func main() {
 		MaxPlayersPerIPTunnel: *maxPlayersPerIP,
 		TrustedProxies:        trustedProxies,
 		Names:                 names,
+		Join:                  join,
 		PublicHost:            *publicHost,
 		Hidden:                hidden,
 		Supporters:            supporters,
@@ -98,6 +105,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", r.servePanel)
 	mux.HandleFunc("/ws", r.handleWS)
+	mux.HandleFunc("/join", r.handleJoin)
 	mux.HandleFunc("/api/status", r.apiStatus)
 	mux.HandleFunc("/api/servers", r.apiServers)
 
