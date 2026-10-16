@@ -71,7 +71,7 @@ function toast(msg, bad) {
   toast.timer = setTimeout(() => { t.hidden = true; }, 3200);
 }
 
-const ACTION_TEXT = { kick: 'Kicked', ban: 'Blocked', unban: 'Unblocked', hide: 'Hidden from the server list', unhide: 'Back on the server list', release_name: 'Address released', supporter: 'Marked as a supporter', unsupporter: 'Supporter badge removed' };
+const ACTION_TEXT = { notice: 'Sent to every connected host', clear_notice: 'Announcement cleared', kick: 'Kicked', ban: 'Blocked', unban: 'Unblocked', hide: 'Hidden from the server list', unhide: 'Back on the server list', release_name: 'Address released', supporter: 'Marked as a supporter', unsupporter: 'Supporter badge removed' };
 
 // A button that asks for a short address first (see grantShort).
 const grantBtn = (id, region) => `<button type="button" class="btn sm" data-grant="${esc(id)}" data-region="${esc(region)}">Short address…</button>`;
@@ -493,8 +493,46 @@ function renderModeration() {
     list('Blocked apps', union('banned'), 'unban', 'Unblock', 'Nobody is blocked.');
 }
 
+// The announcement hosts are being shown right now (the first relay that has one).
+function renderNotice() {
+  const el = $('#notice-state');
+  if (!el) return;
+  const n = relays().map((x) => x.r && x.r.notice).find(Boolean);
+  if (!n) { el.textContent = 'No announcement is showing.'; return; }
+  const left = n.seconds_left > 0 ? ` · ${Math.ceil(n.seconds_left / 60)} min to go` : '';
+  el.textContent = `Showing: "${n.message}"${left}`;
+}
+
+async function sendAction(body, okText) {
+  try {
+    await api('/api/action', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-VP-Admin': '1' }, body: JSON.stringify(body) });
+    toast(okText);
+  } catch (e) {
+    toast(e.message, true);
+  }
+  refresh();
+}
+
+(() => {
+  const text = $('#notice-text');
+  const mins = $('#notice-min');
+  $('#notice-fill').addEventListener('click', () => {
+    const m = Number(mins.value);
+    text.value = m > 0
+      ? `The VoxelPort relay restarts in ${m} minute${m === 1 ? '' : 's'}. Your server reconnects by itself within seconds.`
+      : 'The VoxelPort relay is being restarted. Your server reconnects by itself within seconds.';
+    text.focus();
+  });
+  $('#notice-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    sendAction({ action: 'notice', message: text.value.trim(), minutes: Number(mins.value) }, ACTION_TEXT.notice);
+  });
+  $('#notice-clear').addEventListener('click', () => sendAction({ action: 'clear_notice' }, ACTION_TEXT.clear_notice));
+})();
+
 function renderAll() {
   if (!ov) return;
+  renderNotice();
   renderServices(ov.services);
   renderKPIs();
   renderTunnels();

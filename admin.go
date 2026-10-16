@@ -222,7 +222,13 @@ func (r *relay) adminState() map[string]any {
 		banned = r.banned.list()
 	}
 
+	var notice any
+	if message, seconds, ok := r.activeNotice(); ok {
+		notice = map[string]any{"message": message, "seconds_left": seconds}
+	}
+
 	return map[string]any{
+		"notice":        notice, // the announcement hosts are being shown, or null
 		"started":       r.startedAt,
 		"public_host":   r.publicHost,
 		"ports":         map[string]int{"min": r.minPort, "max": r.maxPort, "used": usedPorts},

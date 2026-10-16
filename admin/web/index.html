@@ -76,6 +76,29 @@
       <div id="na-system"></div>
     </section>
 
+    <section class="block" id="announce">
+      <div class="block-head"><h2>Announce to hosts</h2><span class="muted" id="notice-state"></span></div>
+      <form class="export" id="notice-form" autocomplete="off">
+        <input id="notice-text" maxlength="200" required style="flex: 1 1 380px" aria-label="Message to every host" placeholder="The relay restarts in 10 minutes. Your server reconnects by itself.">
+        <label for="notice-min">happens in</label>
+        <select id="notice-min">
+          <option value="0">no time, just information</option>
+          <option value="2">2 minutes</option>
+          <option value="5" selected>5 minutes</option>
+          <option value="10">10 minutes</option>
+          <option value="15">15 minutes</option>
+          <option value="30">30 minutes</option>
+          <option value="60">1 hour</option>
+          <option value="180">3 hours</option>
+          <option value="1440">24 hours</option>
+        </select>
+        <button type="button" class="btn sm" id="notice-fill">Restart wording</button>
+        <button type="submit" class="btn sm">Send to all hosts</button>
+        <button type="button" class="btn sm" id="notice-clear">Clear</button>
+      </form>
+      <p class="muted" style="margin-top: 8px">Shows as a banner in the desktop and Android apps (new versions), and the app repeats it in Minecraft chat so players see it too. Hosts who connect later get it as well, and the public status shows it.</p>
+    </section>
+
     <section class="block">
       <div class="block-head"><h2>Moderation</h2><span class="muted">Hidden server-list entries and blocked apps</span></div>
       <div class="two-col tight" id="moderation"></div>
