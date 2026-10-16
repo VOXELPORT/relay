@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -22,12 +23,13 @@ import (
 
 // Msg is the single wire envelope exchanged with a host client (mod or app).
 //
-// Client -> relay: register{token, blocked_ips[], udp}, data{conn, data}, close{conn}, ping,
+// Client -> relay: register{token, client?, blocked_ips[], udp}, data{conn, data}, close{conn}, ping,
 // udp{conn, data}, udp_close{conn}, claim_name{name}, release_name, listing{listing?}.
 //
 // Relay -> client: port{port} | error{message}, connect{conn, ip}, data{conn, data}, close{conn}, pong,
 // udp{conn, ip?, data}, udp_close{conn}, udp_error{message}, name{name, address},
-// name_error{message}, listing_error{message}.
+// name_error{message}, listing_error{message}, notice{message, seconds} (an announcement from the
+// operator, such as "relay restarting in 10 minutes"; an empty message clears it).
 //
 // The udp, name and listing frames are additive: an older client never
 // sends udp/claim_name/listing and never receives udp, name or listing frames
@@ -45,6 +47,12 @@ type Msg struct {
 	Name       string   `json:"name,omitempty"`
 	Address    string   `json:"address,omitempty"`
 	Listing    *Listing `json:"listing,omitempty"`
+	// Client names the app and version that opened the tunnel ("desktop/1.7.0",
+	// "android/10"). It is optional, only goes into the relay's own log so a support
+	// question can be answered from facts, and is never trusted for anything else.
+	Client string `json:"client,omitempty"`
+	// Seconds is how long until what a "notice" announces happens (0 = now, or no time given).
+	Seconds int `json:"seconds,omitempty"`
 }
 
 // tokenPattern accepts the auto-generated device tokens produced by the mod/app.
@@ -199,6 +207,42 @@ func (pc *playerConn) close() {
 	})
 }
 
+// Why a tunnel ended. These go into the "[usage]" log line as ended=<code>, so a support
+// question ("my server went offline") can be answered from the log instead of guessed at.
+const (
+	endHostQuit   = "host-quit"   // the host's app closed the tunnel on purpose (stopped, quit, updated)
+	endLost       = "lost"        // the connection died without a goodbye: network drop, sleep, router reset
+	endSilent     = "silent"      // the host sent nothing for idleReadTimeout: stalled or half-dead connection
+	endReplaced   = "replaced"    // the same host registered again, so the old connection was replaced
+	endSendFailed = "send-failed" // the relay could not write to the host's connection
+	endShutdown   = "relay-stop"  // the relay itself was stopped or restarted
+)
+
+// classifyReadError turns the error that ended a tunnel's read loop into one of the codes above.
+func classifyReadError(err error) string {
+	var ne net.Error
+	switch {
+	case websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway):
+		return endHostQuit
+	case errors.As(err, &ne) && ne.Timeout():
+		return endSilent
+	default:
+		return endLost
+	}
+}
+
+// clientNamePattern is what a client may call itself: a short app name and version such as
+// "desktop/1.7.0" or "android/10". Anything else is logged as "unknown", so a client can never
+// put free text (or a line break) into the relay's log.
+var clientNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,15}(/[A-Za-z0-9][A-Za-z0-9._+-]{0,15})?$`)
+
+func cleanClientName(s string) string {
+	if clientNamePattern.MatchString(s) {
+		return s
+	}
+	return "unknown"
+}
+
 // client is one connected host (a single tunnel) with its own public port.
 type client struct {
 	id         string // sha256(token) hex — stable identity for a token
@@ -218,12 +262,37 @@ type client struct {
 	udp     *udpState // non-nil when the host asked for Bedrock (UDP) forwarding
 	listing *Listing  // public server-list entry, nil unless the host opted in (guarded by mu)
 
+	name   string // app and version the host reported (cleaned), for the log only
+	route  string // "direct" (the relay's own TLS listener) or "tunnel" (behind Cloudflare Tunnel or a proxy)
+	endMu  sync.Mutex
+	ended  string // why the tunnel ended; the first reason to be set wins
+
 	// Usage metering — the foundation for per-token limits / billing.
 	startedAt   time.Time    // when this tunnel registered (read-only)
 	bytesIn     atomic.Int64 // player -> host (uploaded through the relay)
 	bytesOut    atomic.Int64 // host -> player (downloaded through the relay)
 	totalConns  atomic.Int64 // lifetime player connections accepted
 	peakPlayers int          // max concurrent players (guarded by mu)
+}
+
+// endWith records why the tunnel ended. Only the first reason counts: when a tunnel is torn down
+// on purpose (replaced, relay stopping) the read loop fails right after, and that failure must
+// not overwrite the real reason.
+func (c *client) endWith(reason string) {
+	c.endMu.Lock()
+	if c.ended == "" {
+		c.ended = reason
+	}
+	c.endMu.Unlock()
+}
+
+func (c *client) endReason() string {
+	c.endMu.Lock()
+	defer c.endMu.Unlock()
+	if c.ended == "" {
+		return endLost
+	}
+	return c.ended
 }
 
 // send writes a control-channel frame to the host. Writes are serialised and
@@ -238,6 +307,7 @@ func (c *client) send(m Msg) {
 	err := c.ws.WriteMessage(websocket.TextMessage, data)
 	c.writeMu.Unlock()
 	if err != nil {
+		c.endWith(endSendFailed)
 		c.close(c.rel)
 	}
 }
@@ -298,6 +368,121 @@ type relay struct {
 	closedOut     atomic.Int64
 	closedConns   atomic.Int64
 	tunnelsServed atomic.Int64
+
+	noticeMu sync.Mutex
+	notice   *operatorNotice // the current announcement to hosts, nil when there is none
+}
+
+// operatorNotice is an announcement the operator sent to every host: "relay restarting in 10 minutes".
+type operatorNotice struct {
+	message string
+	sentAt  time.Time
+	at      time.Time // when the announced thing happens; zero for plain information
+}
+
+const (
+	maxNoticeLen       = 200
+	maxNoticeMinutes   = 24 * 60
+	noticeAfterEvent   = 10 * time.Minute // keep showing it this long after the announced time
+	noticeInfoLifetime = 6 * time.Hour    // a notice with no time expires by itself after this
+)
+
+// cleanNotice checks an announcement: plain text of a sensible length, no control characters, so
+// it is safe to show in an app and to repeat in Minecraft chat.
+func cleanNotice(message string) (string, error) {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return "", errors.New("the message is empty")
+	}
+	if len([]rune(message)) > maxNoticeLen {
+		return "", fmt.Errorf("the message is longer than %d characters", maxNoticeLen)
+	}
+	for _, ch := range message {
+		if ch < 0x20 || ch == 0x7f {
+			return "", errors.New("the message has a control character or line break in it")
+		}
+	}
+	return message, nil
+}
+
+// setNotice announces message to every connected host, and to any host that connects before it
+// expires. minutes is how long until the announced thing happens (0 for plain information).
+// It returns how many hosts it was sent to.
+func (r *relay) setNotice(message string, minutes int) (int, error) {
+	message, err := cleanNotice(message)
+	if err != nil {
+		return 0, err
+	}
+	if minutes < 0 || minutes > maxNoticeMinutes {
+		return 0, fmt.Errorf("minutes must be between 0 and %d", maxNoticeMinutes)
+	}
+	n := &operatorNotice{message: message, sentAt: time.Now()}
+	if minutes > 0 {
+		n.at = n.sentAt.Add(time.Duration(minutes) * time.Minute)
+	}
+	r.noticeMu.Lock()
+	r.notice = n
+	r.noticeMu.Unlock()
+
+	hosts := r.liveClients()
+	for _, c := range hosts {
+		c.send(Msg{Type: "notice", Message: message, Seconds: minutes * 60})
+	}
+	log.Printf("[notice] sent to %d host(s), in %d min: %q", len(hosts), minutes, message)
+	return len(hosts), nil
+}
+
+// clearNotice withdraws the current announcement (the apps hide it).
+func (r *relay) clearNotice() int {
+	r.noticeMu.Lock()
+	had := r.notice != nil
+	r.notice = nil
+	r.noticeMu.Unlock()
+	if !had {
+		return 0
+	}
+	hosts := r.liveClients()
+	for _, c := range hosts {
+		c.send(Msg{Type: "notice"})
+	}
+	log.Printf("[notice] cleared (%d host(s) told)", len(hosts))
+	return len(hosts)
+}
+
+// activeNotice is the announcement that should still be shown, and how many seconds are left
+// until the thing it announces (0 once it is due, or when no time was given).
+func (r *relay) activeNotice() (message string, seconds int, ok bool) {
+	r.noticeMu.Lock()
+	n := r.notice
+	r.noticeMu.Unlock()
+	if n == nil {
+		return "", 0, false
+	}
+	now := time.Now()
+	if n.at.IsZero() {
+		if now.Sub(n.sentAt) > noticeInfoLifetime {
+			return "", 0, false
+		}
+		return n.message, 0, true
+	}
+	if now.After(n.at.Add(noticeAfterEvent)) {
+		return "", 0, false
+	}
+	if left := n.at.Sub(now); left > 0 {
+		seconds = int(left.Round(time.Second) / time.Second)
+	}
+	return n.message, seconds, true
+}
+
+// liveClients is a snapshot of the connected hosts, safe to use without holding r.mu.
+func (r *relay) liveClients() []*client {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]*client, 0, len(r.clients))
+	for _, c := range r.clients {
+		out = append(out, c)
+	}
+	return out
 }
 
 // stickyPortInfo remembers which port a token last used, and when, so a
@@ -306,6 +491,7 @@ type relay struct {
 type stickyPortInfo struct {
 	port     int
 	lastSeen time.Time
+	lastEnd  time.Time // when this token's last tunnel ended (zero if it has not ended yet)
 }
 
 var upgrader = websocket.Upgrader{
@@ -637,6 +823,11 @@ func (r *relay) handleWS(w http.ResponseWriter, req *http.Request) {
 		ws.Close()
 		return
 	}
+	clientName := cleanClientName(reg.Client)
+	route := "tunnel"
+	if req.TLS != nil {
+		route = "direct"
+	}
 	ip := r.clientIP(req)
 	if !r.regLimiter.allow(ip) {
 		sendErr(ws, "too many registration attempts, try again later")
@@ -661,6 +852,7 @@ func (r *relay) handleWS(w http.ResponseWriter, req *http.Request) {
 	sum := sha256.Sum256([]byte(reg.Token))
 	clientID := hex.EncodeToString(sum[:])
 	if r.banned.banned(clientID) {
+		log.Printf("[relay] refused: token %s… client=%s: blocked", clientID[:8], clientName)
 		sendErr(ws, "This app has been blocked from the VoxelPort relay.")
 		ws.Close()
 		return
@@ -684,11 +876,13 @@ func (r *relay) handleWS(w http.ResponseWriter, req *http.Request) {
 		// Releases old's port and decrements its IP's tunnel count
 		// synchronously, so a same-IP reconnect below sees an accurate,
 		// already-freed count instead of racing its own eviction.
+		old.endWith(endReplaced)
 		old.close(r)
 	}
 
 	if r.tunnelsForIP(ip) >= r.maxTunnelsPerIP {
 		r.regSerialize.Unlock()
+		log.Printf("[relay] refused: token %s… client=%s: too many active tunnels from one address", clientID[:8], clientName)
 		sendErr(ws, fmt.Sprintf("too many active tunnels from this address (max %d)", r.maxTunnelsPerIP))
 		ws.Close()
 		return
@@ -697,6 +891,7 @@ func (r *relay) handleWS(w http.ResponseWriter, req *http.Request) {
 	ln, port, err := r.reservePort(clientID)
 	if err != nil {
 		r.regSerialize.Unlock()
+		log.Printf("[relay] refused: token %s… client=%s: %v", clientID[:8], clientName, err)
 		sendErr(ws, err.Error())
 		ws.Close()
 		return
@@ -713,6 +908,8 @@ func (r *relay) handleWS(w http.ResponseWriter, req *http.Request) {
 		ipCounts:   make(map[string]int),
 		blocked:    make(map[string]bool),
 		startedAt:  time.Now(),
+		name:       clientName,
+		route:      route,
 	}
 	for _, blockedIP := range reg.BlockedIPs {
 		c.blocked[blockedIP] = true
@@ -725,6 +922,12 @@ func (r *relay) handleWS(w http.ResponseWriter, req *http.Request) {
 	}
 
 	r.mu.Lock()
+	// How long this host was gone, if it came back within the hour: the number that tells a
+	// quick network blip from a host that closed the app and came back later.
+	cameBack := time.Duration(0)
+	if prev, ok := r.portByID[clientID]; ok && !prev.lastEnd.IsZero() && time.Since(prev.lastEnd) < time.Hour {
+		cameBack = time.Since(prev.lastEnd).Round(time.Second)
+	}
 	r.clients[clientID] = c
 	r.portByID[clientID] = stickyPortInfo{port: port, lastSeen: time.Now()}
 	r.mu.Unlock()
@@ -734,7 +937,19 @@ func (r *relay) handleWS(w http.ResponseWriter, req *http.Request) {
 	r.regSerialize.Unlock()
 
 	c.send(Msg{Type: "port", Port: port})
-	log.Printf("[relay] tunnel up: token %s… -> public port %d", clientID[:8], port)
+	if message, seconds, ok := r.activeNotice(); ok {
+		c.send(Msg{Type: "notice", Message: message, Seconds: seconds})
+	}
+	switch {
+	case old != nil:
+		// The host reconnected while its previous connection still looked alive: the old one had
+		// silently died (a network blip on the host's side) and was replaced.
+		log.Printf("[relay] tunnel up: token %s… -> public port %d client=%s route=%s replaced-a-dead-connection", clientID[:8], port, clientName, route)
+	case cameBack > 0:
+		log.Printf("[relay] tunnel up: token %s… -> public port %d client=%s route=%s back-after=%s", clientID[:8], port, clientName, route, cameBack)
+	default:
+		log.Printf("[relay] tunnel up: token %s… -> public port %d client=%s route=%s", clientID[:8], port, clientName, route)
+	}
 
 	if udpErr != nil {
 		log.Printf("[udp] port %d: %v", port, udpErr)
@@ -767,16 +982,25 @@ func (r *relay) handleWS(w http.ResponseWriter, req *http.Request) {
 		r.closedIn.Add(c.bytesIn.Load())
 		r.closedOut.Add(c.bytesOut.Load())
 		r.closedConns.Add(c.totalConns.Load())
+		r.mu.Lock()
+		if info, ok := r.portByID[clientID]; ok {
+			info.lastEnd = time.Now()
+			r.portByID[clientID] = info
+		}
+		r.mu.Unlock()
 		// Durable per-session usage record (retained in journald/syslog — parse for billing).
-		log.Printf("[usage] token=%s port=%d uptime=%s conns=%d peak_players=%d in=%s out=%s",
+		// ended= says why it ended (see the end* codes), client= and route= say what connected.
+		log.Printf("[usage] token=%s port=%d uptime=%s conns=%d peak_players=%d in=%s out=%s ended=%s client=%s route=%s",
 			clientID[:8], port, time.Since(c.startedAt).Round(time.Second),
-			c.totalConns.Load(), peak, formatBytes(c.bytesIn.Load()), formatBytes(c.bytesOut.Load()))
+			c.totalConns.Load(), peak, formatBytes(c.bytesIn.Load()), formatBytes(c.bytesOut.Load()),
+			c.endReason(), c.name, c.route)
 	}()
 
 	for {
 		ws.SetReadDeadline(time.Now().Add(idleReadTimeout))
 		_, data, err := ws.ReadMessage()
 		if err != nil {
+			c.endWith(classifyReadError(err))
 			return
 		}
 		var m Msg
@@ -1010,9 +1234,7 @@ func (r *relay) apiStatus(w http.ResponseWriter, req *http.Request) {
 	count := len(r.clients)
 	r.mu.Unlock()
 
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	json.NewEncoder(w).Encode(map[string]any{
+	status := map[string]any{
 		"online":  true,
 		"tunnels": count,
 		"players": totalPlayers,
@@ -1021,7 +1243,13 @@ func (r *relay) apiStatus(w http.ResponseWriter, req *http.Request) {
 			"bytes_out":   totalOut,
 			"total_conns": totalConns,
 		},
-	})
+	}
+	if message, seconds, ok := r.activeNotice(); ok {
+		status["notice"] = map[string]any{"message": message, "seconds_left": seconds}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	json.NewEncoder(w).Encode(status)
 }
 
 // shutdown closes every active tunnel — its listener, all player
@@ -1036,6 +1264,23 @@ func (r *relay) shutdown() {
 		clients = append(clients, c)
 	}
 	r.mu.Unlock()
+	// Tell every host first (in parallel, and never for more than two seconds in total), so an app can
+	// say "restarting, reconnecting" instead of looking broken.
+	var told sync.WaitGroup
+	for _, c := range clients {
+		c.endWith(endShutdown)
+		told.Add(1)
+		go func(c *client) {
+			defer told.Done()
+			c.send(Msg{Type: "notice", Message: "The VoxelPort relay is restarting. Your server reconnects by itself in a few seconds."})
+		}(c)
+	}
+	done := make(chan struct{})
+	go func() { told.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+	}
 	for _, c := range clients {
 		c.close(r)
 	}
