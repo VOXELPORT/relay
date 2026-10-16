@@ -410,6 +410,15 @@ function renderDownloads() {
   el.innerHTML = html;
 }
 
+// What the search box asks for. Kept here (not read from the box) so the list stays filtered when it redraws.
+let nameFilter = '';
+
+/** Does an address match the search? Every word typed must be found in its name, id, port or tags. */
+function matchesName(n, query) {
+  const hay = `${n.name} ${n.id} ${n.port} ${n.region} ${n.supporter ? 'supporter' : ''} ${n.online ? 'online' : ''}`.toLowerCase();
+  return query.toLowerCase().split(/\s+/).filter(Boolean).every((word) => hay.includes(word));
+}
+
 function renderNames() {
   const el = $('#names');
   const rs = relays().filter((x) => x.r && x.r.names_enabled);
@@ -417,9 +426,12 @@ function renderNames() {
     el.innerHTML = relays().some((x) => x.r) ? '<tr><td class="empty">Custom addresses are off (no Cloudflare token).</td></tr>' : '';
     return;
   }
-  const names = rs.flatMap((x) => x.r.names.map((n) => ({ ...n, region: x.id })));
-  $('#names-count').textContent = `${names.length} claimed${naOn() ? ` · ${rs.map((x) => `${x.label} ${x.r.names.length}`).join(' · ')}` : ''}`;
-  if (!names.length) { el.innerHTML = '<tr><td class="empty">Nobody has claimed an address yet.</td></tr>'; return; }
+  const all = rs.flatMap((x) => x.r.names.map((n) => ({ ...n, region: x.id })));
+  const names = nameFilter.trim() ? all.filter((n) => matchesName(n, nameFilter)) : all;
+  const claimed = `${all.length} claimed${naOn() ? ` · ${rs.map((x) => `${x.label} ${x.r.names.length}`).join(' · ')}` : ''}`;
+  $('#names-count').textContent = nameFilter.trim() ? `${names.length} of ${all.length} shown` : claimed;
+  if (!all.length) { el.innerHTML = '<tr><td class="empty">Nobody has claimed an address yet.</td></tr>'; return; }
+  if (!names.length) { el.innerHTML = `<tr><td class="empty">No address matches “${esc(nameFilter.trim())}”.</td></tr>`; return; }
   el.innerHTML = `<thead><tr><th>Address</th><th class="r">Port</th><th>Last used</th><th class="r"></th></tr></thead><tbody>` +
     names.map((n) => `<tr>
       <td><span class="dot ${n.online ? 'good' : ''}" style="display:inline-block;margin-right:6px"></span><b>${esc(n.name)}</b>${regionTag(n.region)}${n.supporter ? '<span class="tag supporter-tag">Supporter</span>' : ''}<div class="muted mono">id ${esc(n.id)} · since ${esc(new Date(n.created).toLocaleDateString())}</div></td>
@@ -492,6 +504,13 @@ function renderModeration() {
     list('Hidden from the server list', union('hidden'), 'unhide', 'Unhide', 'Nothing hidden.') +
     list('Blocked apps', union('banned'), 'unban', 'Unblock', 'Nobody is blocked.');
 }
+
+(() => {
+  const box = $('#names-search');
+  if (!box) return;
+  box.addEventListener('input', () => { nameFilter = box.value; renderNames(); });
+  box.addEventListener('keydown', (e) => { if (e.key === 'Escape') { box.value = ''; nameFilter = ''; renderNames(); } });
+})();
 
 // The announcement hosts are being shown right now (the first relay that has one).
 function renderNotice() {

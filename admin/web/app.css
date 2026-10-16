@@ -160,3 +160,7 @@ h3.sub { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 .tag.region-na { color: var(--series-2); border-color: var(--series-2); }
 .tag.region-in { color: var(--series-1); border-color: var(--series-1); }
+
+/* Search box in a block header (custom addresses) */
+.block-head .search { flex: 1 1 200px; max-width: 320px; margin-left: auto; font: inherit; font-size: 13px; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
+.block-head .search:focus-visible { outline: 2px solid var(--series-1); outline-offset: 1px; }
