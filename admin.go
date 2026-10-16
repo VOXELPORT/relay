@@ -281,9 +281,12 @@ func (r *relay) fullClientID(prefix string) string {
 }
 
 type adminAction struct {
-	Action string `json:"action"` // kick | ban | unban | hide | unhide | supporter | unsupporter | grant_name | release_name
+	Action string `json:"action"` // kick | ban | unban | hide | unhide | supporter | unsupporter | grant_name | release_name | notice | clear_notice
 	ID     string `json:"id"`     // client-ID prefix (kick, ban, unban, hide, unhide, supporter, unsupporter, grant_name, release_name)
 	Name   string `json:"name"`   // or a custom-address name (hide, unhide, supporter, unsupporter); the short name to give (grant_name)
+
+	Message string `json:"message"` // notice: what to tell every host ("The relay restarts in 10 minutes.")
+	Minutes int    `json:"minutes"` // notice: how many minutes until it happens (0 = just information)
 }
 
 func (r *relay) adminDo(a adminAction) error {
@@ -293,6 +296,14 @@ func (r *relay) adminDo(a adminAction) error {
 		return errors.New("id must be at least 8 hex characters")
 	}
 	switch a.Action {
+	case "notice":
+		if _, err := r.setNotice(a.Message, a.Minutes); err != nil {
+			return err
+		}
+		return nil
+	case "clear_notice":
+		r.clearNotice()
+		return nil
 	case "kick":
 		if id == "" {
 			return errors.New("missing id") // an empty prefix would match any tunnel
