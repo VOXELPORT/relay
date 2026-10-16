@@ -93,6 +93,8 @@ func TestActionRouting(t *testing.T) {
 		`{"action":"unhide","name":"steve"}`:                  {1, 1},
 		`{"action":"supporter","name":"steve"}`:               {1, 1},
 		`{"action":"unsupporter","id":"abcdef12"}`:            {1, 1},
+		`{"action":"notice","message":"Restart soon","minutes":5}`: {1, 1},
+		`{"action":"clear_notice"}`:                          {1, 1},
 		`{"action":"grant_name","id":"abcdef12","name":"vp"}`: {1, 0},
 		`{"action":"kick","id":"abcdef12","region":"na"}`:     {0, 1},
 		`{"action":"release_name","id":"abcdef12"}`:           {1, 0},

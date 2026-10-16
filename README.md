@@ -133,7 +133,7 @@ JSON text frames (matches the app's tunnel client):
 
 | Direction      | Frame |
 |----------------|-------|
-| host → relay   | `{"type":"register","token":"vp_…","blocked_ips":[...],"udp":true?}` |
+| host → relay   | `{"type":"register","token":"vp_…","client":"desktop/1.7.0"?,"blocked_ips":[...],"udp":true?}` |
 | host → relay   | `{"type":"ping"}` |
 | host → relay   | `{"type":"data","conn":id,"data":base64}` |
 | host → relay   | `{"type":"close","conn":id}` |
@@ -143,6 +143,7 @@ JSON text frames (matches the app's tunnel client):
 | relay → host   | `{"type":"close","conn":id}` |
 | relay → host   | `{"type":"pong"}` |
 | relay → host   | `{"type":"error","message":"..."}` |
+| relay → host   | `{"type":"notice","message":"…","seconds":N?}`: an announcement from the operator; an empty message withdraws it |
 
 ### Bedrock (UDP)
 
@@ -206,6 +207,52 @@ nothing is taken from free hosts. The operator API also has
 character address (hosts can't claim those themselves; it replaces the address
 they have now, and fails if the name is taken). This adds no wire-protocol
 frames: existing apps are unaffected.
+
+## Reading the log
+
+Every tunnel writes two lines, enough to answer "why did my server go offline?":
+
+```
+[relay] tunnel up: token 7af8e6d0… -> public port 26042 client=desktop/1.7.0 route=direct back-after=2m52s
+[usage] token=7af8e6d0 port=26042 uptime=5m36s conns=4 peak_players=1 in=134B out=480B ended=lost client=desktop/1.7.0 route=direct
+```
+
+- `client=` is the app and version the host reported in its register frame (`desktop/1.7.0`,
+  `android/10`, `cli/…`). It is optional and checked against a strict pattern, so a client can
+  never write free text into the log; anything else shows as `unknown`.
+- `route=` is `direct` (the relay's own TLS listener) or `tunnel` (behind Cloudflare Tunnel or a proxy).
+- `back-after=` says how long the host was gone when it came back within the hour.
+  `replaced-a-dead-connection` means it reconnected while its old connection still looked alive:
+  the host's network blipped and the relay had not noticed yet.
+- `ended=` says why the tunnel ended:
+
+| `ended=`    | Meaning |
+|-------------|---------|
+| `host-quit`   | the host's app closed the tunnel on purpose (stopped, quit, updating) |
+| `lost`        | the connection died with no goodbye: network drop, sleep, router reset |
+| `silent`      | nothing from the host for 90 seconds: a stalled or half-dead connection |
+| `replaced`    | the same host registered again, so the old connection was replaced |
+| `send-failed` | the relay could not write to the host's connection |
+| `relay-stop`  | the relay itself was stopped or restarted |
+
+No IP addresses are written to the log.
+
+## Announcing to hosts
+
+The operator can send every connected host a short notice (200 characters, plain text), for
+example "The relay restarts in 10 minutes." Apps that understand it show a banner and repeat it in
+Minecraft chat; older apps ignore it. Hosts who connect after it was sent get it too, with the time
+that is left, and `/api/status` shows it as `"notice":{"message":…,"seconds_left":…}`.
+
+Send it from the dashboard ("Announce to hosts"), or on the operator API:
+
+```sh
+curl -H "Authorization: Bearer $VOXELPORT_ADMIN_TOKEN" -d '{"action":"notice","message":"The relay restarts in 10 minutes.","minutes":10}' http://127.0.0.1:2528/action
+curl -H "Authorization: Bearer $VOXELPORT_ADMIN_TOKEN" -d '{"action":"clear_notice"}' http://127.0.0.1:2528/action
+```
+
+A notice with a time expires 10 minutes after it; one without a time expires after 6 hours. When
+the relay is stopped on purpose it tells every host "restarting" first.
 
 ## Compatibility
 

@@ -62,7 +62,7 @@ func (u *upstreams) action(body []byte) (int, map[string]any) {
 	var a struct{ Action, Region string }
 	json.Unmarshal(body, &a)
 	switch a.Action {
-	case "ban", "unban", "hide", "unhide", "supporter", "unsupporter":
+	case "ban", "unban", "hide", "unhide", "supporter", "unsupporter", "notice", "clear_notice":
 		code, out := u.actionOn(u.relay, body)
 		if u.relayNA != "" {
 			if c2, out2 := u.actionOn(u.relayNA, body); c2 != http.StatusOK && code == http.StatusOK {
