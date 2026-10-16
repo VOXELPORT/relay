@@ -1272,7 +1272,7 @@ func (r *relay) shutdown() {
 		told.Add(1)
 		go func(c *client) {
 			defer told.Done()
-			c.send(Msg{Type: "notice", Message: "The VoxelPort relay is restarting. Your server reconnects by itself in a few seconds."})
+			c.send(Msg{Type: "notice", Message: "The VoxelPort relay is restarting. Aapka server apne aap reconnect ho jayega (your server reconnects by itself)."})
 		}(c)
 	}
 	done := make(chan struct{})

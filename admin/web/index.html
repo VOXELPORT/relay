@@ -79,7 +79,7 @@
     <section class="block" id="announce">
       <div class="block-head"><h2>Announce to hosts</h2><span class="muted" id="notice-state"></span></div>
       <form class="export" id="notice-form" autocomplete="off">
-        <input id="notice-text" maxlength="200" required style="flex: 1 1 380px" aria-label="Message to every host" placeholder="The relay restarts in 10 minutes. Your server reconnects by itself.">
+        <input id="notice-text" maxlength="200" required style="flex: 1 1 380px" aria-label="Message to every host" placeholder="The VoxelPort relay will restart. Your server reconnects by itself.">
         <label for="notice-min">happens in</label>
         <select id="notice-min">
           <option value="0">no time, just information</option>
@@ -96,7 +96,7 @@
         <button type="submit" class="btn sm">Send to all hosts</button>
         <button type="button" class="btn sm" id="notice-clear">Clear</button>
       </form>
-      <p class="muted" style="margin-top: 8px">Shows as a banner in the desktop and Android apps (new versions), and the app repeats it in Minecraft chat so players see it too. Hosts who connect later get it as well, and the public status shows it.</p>
+      <p class="muted" style="margin-top: 8px">Do not type the time: the apps add it ("in 10 min") and count it down from the choice above. Shows as a banner in the desktop and Android apps (new versions), and the app repeats it in Minecraft chat so players see it too. Hosts who connect later get it as well, and the public status shows it.</p>
     </section>
 
     <section class="block">
