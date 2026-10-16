@@ -518,9 +518,8 @@ async function sendAction(body, okText) {
   const mins = $('#notice-min');
   $('#notice-fill').addEventListener('click', () => {
     const m = Number(mins.value);
-    text.value = m > 0
-      ? `The VoxelPort relay restarts in ${m} minute${m === 1 ? '' : 's'}. Your server reconnects by itself within seconds.`
-      : 'The VoxelPort relay is being restarted. Your server reconnects by itself within seconds.';
+    // No time in the text: the apps add it and count it down from the "happens in" choice.
+    text.value = 'The VoxelPort relay will restart. Aapka server apne aap reconnect ho jayega (your server reconnects by itself).';
     text.focus();
   });
   $('#notice-form').addEventListener('submit', (e) => {

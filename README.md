@@ -240,14 +240,15 @@ No IP addresses are written to the log.
 ## Announcing to hosts
 
 The operator can send every connected host a short notice (200 characters, plain text), for
-example "The relay restarts in 10 minutes." Apps that understand it show a banner and repeat it in
-Minecraft chat; older apps ignore it. Hosts who connect after it was sent get it too, with the time
+example "The VoxelPort relay will restart." Do not put the time in the text: the apps add it
+("in 10 min") from the `minutes` value and count it down. Apps that understand it show a banner and
+repeat it in Minecraft chat; older apps ignore it. Hosts who connect after it was sent get it too, with the time
 that is left, and `/api/status` shows it as `"notice":{"message":…,"seconds_left":…}`.
 
 Send it from the dashboard ("Announce to hosts"), or on the operator API:
 
 ```sh
-curl -H "Authorization: Bearer $VOXELPORT_ADMIN_TOKEN" -d '{"action":"notice","message":"The relay restarts in 10 minutes.","minutes":10}' http://127.0.0.1:2528/action
+curl -H "Authorization: Bearer $VOXELPORT_ADMIN_TOKEN" -d '{"action":"notice","message":"The VoxelPort relay will restart.","minutes":10}' http://127.0.0.1:2528/action
 curl -H "Authorization: Bearer $VOXELPORT_ADMIN_TOKEN" -d '{"action":"clear_notice"}' http://127.0.0.1:2528/action
 ```
 
