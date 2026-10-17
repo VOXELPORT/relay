@@ -25,6 +25,7 @@ type fakeDNS struct {
 	existing map[string]bool // names that already have records "outside" VoxelPort
 	ports    map[string]int  // srv record id -> port
 	deleted  []string
+	repoints []int // ports records were moved to
 	next     int
 }
 
@@ -51,6 +52,7 @@ func (f *fakeDNS) Repoint(_ context.Context, records []string, _ string, port in
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.ports[records[1]] = port
+	f.repoints = append(f.repoints, port)
 	return nil
 }
 

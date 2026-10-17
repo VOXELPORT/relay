@@ -8,7 +8,7 @@ Type=simple
 User=voxelport
 Group=voxelport
 WorkingDirectory=/opt/voxelport
-ExecStart=/opt/voxelport/voxelport-relay -listen 127.0.0.1:2526 -min-port 25500 -max-port 25999
+ExecStart=/opt/voxelport/voxelport-relay -listen 127.0.0.1:2526 -min-port 25500 -max-port 29999
 Restart=on-failure
 RestartSec=3
 

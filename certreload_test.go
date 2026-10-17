@@ -123,7 +123,7 @@ func TestValidateDirectListener(t *testing.T) {
 		{"port out of range", ":70000", "c.pem", "k.pem", true},
 	}
 	for _, tc := range cases {
-		err := validateDirectListener(tc.addr, tc.cert, tc.key, 26000, 26498)
+		err := validateDirectListener(tc.addr, tc.cert, tc.key, 26000, 26498, nil)
 		if (err != nil) != tc.wantErr {
 			t.Errorf("%s: err = %v, wantErr %v", tc.name, err, tc.wantErr)
 		}

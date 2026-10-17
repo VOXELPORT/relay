@@ -7,14 +7,14 @@
 # DO THESE FIRST (the TLS cert step will fail otherwise):
 #   1. DNS: point  relay.voxelport.in  AND  play.voxelport.in  A records
 #           at your home STATIC public IP.
-#   2. Router: forward  TCP 80, 443, 25500-25999  ->  this machine's LAN IP.
+#   2. Router: forward  TCP 80, 443, 25500-29999  ->  this machine's LAN IP.
 #   3. Keep this script and the 'voxelport-relay' binary in the SAME folder.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 DOMAIN="relay.voxelport.in"
 MINPORT=25500
-MAXPORT=25999
+MAXPORT=29999
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BIN_SRC="$HERE/voxelport-relay"
 
