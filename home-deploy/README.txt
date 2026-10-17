@@ -18,8 +18,10 @@ DO THESE FIRST (before running the script)
        relay.voxelport.in   ->  <your static IP>
        play.voxelport.in    ->  <your static IP>
 
-3. Router — forward these to the mini PC's LAN IP (all TCP):
+3. Router — forward these to the mini PC's LAN IP (all TCP; add UDP for the player ports if you serve Bedrock players):
        80, 443, 25500-29999
+   The player range is 4,500 ports wide. Port 25565 is never handed out by the relay, so a Minecraft server on the same
+   machine can keep it (see -reserved-ports in the README).
    (Do NOT forward 22 — you manage over LAN.)
 
 ────────────────────────────────────────────────────────────────────────
