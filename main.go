@@ -35,6 +35,7 @@ func main() {
 	namePortGrace := flag.Duration("name-port-grace", defaultNamePortGrace, "how long a custom address keeps its port reserved after its host was last seen (supporters' and granted addresses keep it for good)")
 	maxReservedFraction := flag.Float64("max-reserved-port-fraction", defaultMaxReservedFraction, "largest share of the port range that custom addresses may reserve (0-1]; new claims fail once it is reached")
 	nameClaimsPerIPDay := flag.Int("name-claims-per-ip-day", defaultNameClaimsPerIPDay, "new custom addresses one IPv4 address may claim per 24 hours")
+	namesSupportersOnly := flag.Bool("names-supporters-only", false, "new custom addresses only for supporters (supporters.txt) and the operator's own grants. Each address is DNS records, and a zone has a fixed number. Existing addresses keep working, and releasing one is still allowed")
 	nameClaimsPerIP6Day := flag.Int("name-claims-per-ip6-day", defaultNameClaimsPerIPDay6, "new custom addresses one IPv6 /64 may claim per 24 hours")
 	cert := flag.String("tls-cert", os.Getenv("RELAY_CERT"), "TLS certificate file (PEM) — enables wss://")
 	key := flag.String("tls-key", os.Getenv("RELAY_KEY"), "TLS key file (PEM)")
@@ -123,6 +124,7 @@ func main() {
 		MaxReservedPortFraction: *maxReservedFraction,
 		NameClaimsPerIPDay:      *nameClaimsPerIPDay,
 		NameClaimsPerIPDay6:     *nameClaimsPerIP6Day,
+		NamesSupportersOnly:     *namesSupportersOnly,
 		ReservedPorts:           reserved,
 	})
 	if names != nil {
