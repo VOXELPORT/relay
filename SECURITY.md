@@ -122,7 +122,7 @@ internet:
 reduce *casual* discovery — someone browsing the status page can't build a
 directory of every live server. This is **not** a security boundary: the
 assigned port is a normal public TCP port in a known, fairly small range
-(`-min-port`..`-max-port`, 500 ports by default), and is trivially
+(`-min-port`..`-max-port`, 4,500 ports by default), and is trivially
 discoverable by scanning that range or by simply being told the address by
 a player who already has it (which is the whole point — that's how people
 join). Treat an assigned port as public information, not a secret.

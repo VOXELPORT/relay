@@ -37,7 +37,7 @@ sudo systemctl reload caddy
 
 ```bash
 sudo ufw allow 443/tcp            # wss:// control connection (via Caddy)
-sudo ufw allow 25500:25999/tcp    # public Minecraft player ports
+sudo ufw allow 25500:29999/tcp    # public Minecraft player ports (4,500 of them)
 ```
 
 ## 5. Install the service  (VPS)
@@ -49,8 +49,11 @@ sudo systemctl enable --now voxelport-relay
 sudo systemctl status voxelport-relay
 ```
 
-The unit runs `voxelport-relay -listen 127.0.0.1:2526 -min-port 25500 -max-port 25999`.
-Edit the `ExecStart` line to change the port range.
+The unit runs `voxelport-relay -listen 127.0.0.1:2526 -min-port 25500 -max-port 29999`.
+Edit the `ExecStart` line to change the port range. Port 25565 (Minecraft's own default) is never handed out
+(`-reserved-ports`), so a Minecraft server on the same machine can keep it. Anything else you run on this machine
+that listens inside the range should be added to `-reserved-ports` too, as should the port of a
+`-direct-listen` listener if you place it inside the range.
 
 ## 6. Verify
 

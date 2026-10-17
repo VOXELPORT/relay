@@ -4,7 +4,7 @@
 # Let's Encrypt certificate automatically.
 #
 # DNS: relay.voxelport.in A record must point at the relay VPS IP.
-# The player-facing TCP port range (25500-25999) is NOT proxied here — vanilla
+# The player-facing TCP port range (25500-29999) is NOT proxied here — vanilla
 # players connect to those ports directly, so open them in the VPS firewall.
 # play.voxelport.in should resolve to the same IP (players join play.voxelport.in:<port>).
 

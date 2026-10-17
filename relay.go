@@ -330,8 +330,9 @@ type relay struct {
 	// and "the per-IP tunnel limit can't be bypassed by racing requests".
 	regSerialize sync.Mutex
 
-	minPort int
-	maxPort int
+	minPort  int
+	maxPort  int
+	reserved map[int]bool // ports in the range that tunnels must never take (see relayConfig.ReservedPorts)
 
 	maxTunnelsPerIP       int
 	maxPlayersPerIPTunnel int
@@ -485,6 +486,19 @@ func (r *relay) liveClients() []*client {
 	return out
 }
 
+// countIn is how many of ports lie within [lo, hi].
+func countIn(ports []int, lo, hi int) int {
+	n := 0
+	seen := map[int]bool{}
+	for _, p := range ports {
+		if p >= lo && p <= hi && !seen[p] {
+			seen[p] = true
+			n++
+		}
+	}
+	return n
+}
+
 // stickyPortInfo remembers which port a token last used, and when, so a
 // reconnect can be handed the same port back and so stale entries can
 // eventually be forgotten (see stickyPortTTL).
@@ -515,6 +529,14 @@ type relayConfig struct {
 	Hidden     *hiddenList
 	Supporters *supporterList
 
+	// Capacity rules for custom addresses (zero = the default in names.go).
+	NamePortGrace           time.Duration // how long an absent host keeps its name's port
+	MaxReservedPortFraction float64       // share of the port range names may reserve
+	NameClaimsPerIPDay      int           // new claims per IPv4 address per day
+	NameClaimsPerIPDay6     int           // new claims per IPv6 /64 per day
+	// ReservedPorts are inside the range but never handed to a tunnel: ports other programs on the machine use.
+	ReservedPorts []int
+
 	// Zero means "use the production default" — only tests need to set these.
 	InitialPlayerTimeout time.Duration
 	PlayerIdleTimeout    time.Duration
@@ -536,6 +558,7 @@ func newRelay(cfg relayConfig) *relay {
 		ipTunnels:             make(map[string]int),
 		minPort:               cfg.MinPort,
 		maxPort:               cfg.MaxPort,
+		reserved:              map[int]bool{},
 		tokenSecret:           cfg.TokenSecret,
 		maxTunnelsPerIP:       cfg.MaxTunnelsPerIP,
 		maxPlayersPerIPTunnel: cfg.MaxPlayersPerIPTunnel,
@@ -551,6 +574,19 @@ func newRelay(cfg relayConfig) *relay {
 	}
 	if r.publicHost == "" {
 		r.publicHost = "localhost"
+	}
+	for _, p := range cfg.ReservedPorts {
+		r.reserved[p] = true
+	}
+	if r.names != nil {
+		r.names.configure(nameLimits{
+			Grace:               cfg.NamePortGrace,
+			MaxReservedFraction: cfg.MaxReservedPortFraction,
+			PoolSize:            cfg.MaxPort - cfg.MinPort + 1 - countIn(cfg.ReservedPorts, cfg.MinPort, cfg.MaxPort),
+			Keep:                r.supporters.has,
+			ClaimsPerIPDay:      cfg.NameClaimsPerIPDay,
+			ClaimsPerIPDay6:     cfg.NameClaimsPerIPDay6,
+		})
 	}
 	go r.sweepLoop()
 	return r
@@ -598,12 +634,16 @@ func newID() (string, error) {
 // Callers must already hold r.regSerialize.
 func (r *relay) reservePort(clientID string) (net.Listener, int, error) {
 	tryBind := func(port int) (net.Listener, bool) {
-		// A port behind someone else's custom address stays theirs even while
-		// they're offline, or their DNS record would point at a stranger.
-		if r.names != nil {
-			if owner := r.names.portOwner(port); owner != "" && owner != clientID {
-				return nil, false
-			}
+		// Ports other programs on this machine use are never handed out.
+		if r.reserved[port] {
+			return nil, false
+		}
+		// A port behind someone else's custom address stays theirs while its host is away, for the port
+		// grace period (always, for a supporter or a granted address): otherwise the address's DNS record
+		// would point at a stranger. Once the grace has passed, the port is free for anyone, and the host
+		// gets another when it returns (and its DNS record follows).
+		if r.names != nil && r.names.portHeldFrom(port, clientID, time.Now()) {
+			return nil, false
 		}
 		r.mu.Lock()
 		if r.usedPort[port] {
@@ -988,6 +1028,9 @@ func (r *relay) handleWS(w http.ResponseWriter, req *http.Request) {
 			r.portByID[clientID] = info
 		}
 		r.mu.Unlock()
+		if r.names != nil {
+			r.names.touchClosed(clientID) // the port grace counts from now
+		}
 		// Durable per-session usage record (retained in journald/syslog — parse for billing).
 		// ended= says why it ended (see the end* codes), client= and route= say what connected.
 		log.Printf("[usage] token=%s port=%d uptime=%s conns=%d peak_players=%d in=%s out=%s ended=%s client=%s route=%s",
@@ -1058,7 +1101,7 @@ func (r *relay) handleClientMsg(c *client, m Msg) {
 		name, port := m.Name, c.publicPort
 		// DNS calls take a moment — never block this tunnel's data path on them.
 		go func() {
-			e, err := r.names.claim(c.id, name, port)
+			e, err := r.names.claimFrom(c.id, c.sourceIP, name, port)
 			if err != nil {
 				c.send(Msg{Type: "name_error", Message: err.Error()})
 				return

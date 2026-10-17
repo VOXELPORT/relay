@@ -19,7 +19,7 @@ DO THESE FIRST (before running the script)
        play.voxelport.in    ->  <your static IP>
 
 3. Router — forward these to the mini PC's LAN IP (all TCP):
-       80, 443, 25500-25999
+       80, 443, 25500-29999
    (Do NOT forward 22 — you manage over LAN.)
 
 ────────────────────────────────────────────────────────────────────────
