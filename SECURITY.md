@@ -20,7 +20,7 @@ rather than a feature, that's intentional.
   `relay.go`'s per-client `players` map and `TestCrossTunnelIsolation`).
 - **Resource-exhaustion abuse of the relay itself**, within the limits
   documented in README.md's "Limits" section (registration rate, tunnels per
-  IP, players per tunnel and per IP, message size, idle timeouts).
+  source, players per tunnel and per source, custom-address claims, message size, idle timeouts).
 - **Token confidentiality in transit**, when the deployment is configured
   correctly for TLS (see "What TLS protects" below) — the default relay URL
   the app uses is `wss://`.
@@ -113,8 +113,34 @@ internet:
   would be against a directly-exposed server.
 - **Automated probing / bots.** Same exposure as any public Minecraft
   server address.
-- **Relay infrastructure abuse.** Covered by the per-IP tunnel/registration
+- **Relay infrastructure abuse.** Covered by the per-source tunnel/registration
   limits — see README.md.
+- **Squatting the port pool with custom addresses.** A custom address points DNS at a fixed port, so the port has to
+  be held for its owner while they're away. Three things stop that from being used to exhaust the pool: a port is held
+  only for `-name-port-grace` (7 days) after the host was last seen (supporters' and operator-granted addresses keep
+  theirs; when anyone else returns to a port that was given away they get another, and the DNS record follows);
+  names may reserve at most `-max-reserved-port-fraction` (half) of the port range, counting only names inside their
+  grace, with supporters and operator grants exempt; and each source may claim only a few new addresses a day
+  (`-name-claims-per-ip-day`, `-name-claims-per-ip6-day`). One caveat: between the end of the grace and the owner's
+  return, a port may be in use by another host while the owner's address still points at it, so players of that
+  address would reach the other server until the owner reconnects (the address expires entirely after 60 days unused).
+
+### Limits are per source *key*, and why
+
+Per-source limits (tunnels, players per tunnel, registrations, new custom addresses) count under a key: an IPv4 address,
+or the /64 of an IPv6 address (IPv4-mapped IPv6 counts as IPv4). IPv6 is grouped because one home or phone gets a whole
+/64 and could otherwise pass as thousands of sources. IPv4 limits are deliberately generous because most Indian mobile
+networks put thousands of subscribers behind a single IPv4 address (carrier-grade NAT); a tight per-address limit would
+lock real players out, and the cost of the extra room is bounded by the tunnel-wide caps. The honest consequence: a single
+IPv4 address may hold up to 25 tunnels, and one IPv6 /64 up to 5. Sources are taken from the connection, or from
+`X-Forwarded-For`/`X-Real-IP` only when the peer is a trusted proxy (see README.md).
+
+### Binary frames
+
+Protocol v2 binary frames are validated before anything acts on them: shorter than the 17-byte header, an unknown kind, an
+unknown connection, or a UDP payload over 2048 bytes is dropped (logged at most once every 30 seconds per tunnel), and a
+binary frame on a tunnel that did not negotiate v2 is ignored. They add no new capability: a host can only address its own
+connections, exactly as with JSON frames.
 
 ### Ports are not secret
 
@@ -122,7 +148,7 @@ internet:
 reduce *casual* discovery — someone browsing the status page can't build a
 directory of every live server. This is **not** a security boundary: the
 assigned port is a normal public TCP port in a known, fairly small range
-(`-min-port`..`-max-port`, 500 ports by default), and is trivially
+(`-min-port`..`-max-port`, 4,500 ports by default), and is trivially
 discoverable by scanning that range or by simply being told the address by
 a player who already has it (which is the whole point — that's how people
 join). Treat an assigned port as public information, not a secret.
