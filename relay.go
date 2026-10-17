@@ -31,6 +31,10 @@ import (
 // name_error{message}, listing_error{message}, notice{message, seconds} (an announcement from the
 // operator, such as "relay restarting in 10 minutes"; an empty message clears it).
 //
+// Protocol v2 (frames.go): a host that registers with bin:1 and is answered with bin:1 in the port frame sends and
+// receives TCP and UDP payloads as binary WebSocket messages instead of base64 inside "data" and "udp" frames. Control
+// frames stay JSON.
+//
 // The udp, name and listing frames are additive: an older client never
 // sends udp/claim_name/listing and never receives udp, name or listing frames
 // unless it asked, so existing mod/app versions keep working unchanged.
@@ -53,6 +57,9 @@ type Msg struct {
 	Client string `json:"client,omitempty"`
 	// Seconds is how long until what a "notice" announces happens (0 = now, or no time given).
 	Seconds int `json:"seconds,omitempty"`
+	// Bin asks for (in register) and confirms (in port) protocol v2: payloads as binary frames. Older clients never send
+	// it and ignore it in port, so they keep getting JSON.
+	Bin int `json:"bin,omitempty"`
 }
 
 // tokenPattern accepts the auto-generated device tokens produced by the mod/app.
@@ -269,8 +276,11 @@ type client struct {
 	blocked   map[string]bool
 	closeOnce sync.Once
 
-	udp     *udpState // non-nil when the host asked for Bedrock (UDP) forwarding
-	listing *Listing  // public server-list entry, nil unless the host opted in (guarded by mu)
+	udp *udpState // non-nil when the host asked for Bedrock (UDP) forwarding
+	bin bool      // protocol v2: payloads travel as binary frames (set before the tunnel is published, never changed)
+
+	badFrameAt atomic.Int64 // when a malformed binary frame was last logged (unix nanoseconds), to rate-limit the log
+	listing    *Listing     // public server-list entry, nil unless the host opted in (guarded by mu)
 
 	name  string // app and version the host reported (cleaned), for the log only
 	route string // "direct" (the relay's own TLS listener) or "tunnel" (behind Cloudflare Tunnel or a proxy)
@@ -311,15 +321,8 @@ func (c *client) endReason() string {
 // recover a broken control channel, so leaving it half-alive would just leak
 // resources and confuse the host.
 func (c *client) send(m Msg) {
-	c.writeMu.Lock()
 	data, _ := json.Marshal(m)
-	c.ws.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
-	err := c.ws.WriteMessage(websocket.TextMessage, data)
-	c.writeMu.Unlock()
-	if err != nil {
-		c.endWith(endSendFailed)
-		c.close(c.rel)
-	}
+	c.writeFrame(websocket.TextMessage, data)
 }
 
 // relay is the multi-tenant hub. Every host token maps to at most one live tunnel.
@@ -1003,6 +1006,7 @@ func (r *relay) handleWS(w http.ResponseWriter, req *http.Request) {
 		startedAt:  time.Now(),
 		name:       clientName,
 		route:      route,
+		bin:        reg.Bin == 1,
 	}
 	for _, blockedIP := range reg.BlockedIPs {
 		c.blocked[blockedIP] = true
@@ -1029,7 +1033,11 @@ func (r *relay) handleWS(w http.ResponseWriter, req *http.Request) {
 
 	r.regSerialize.Unlock()
 
-	c.send(Msg{Type: "port", Port: port})
+	portReply := Msg{Type: "port", Port: port}
+	if c.bin {
+		portReply.Bin = 1 // both sides now speak protocol v2 (binary payload frames)
+	}
+	c.send(portReply)
 	if message, seconds, ok := r.activeNotice(); ok {
 		c.send(Msg{Type: "notice", Message: message, Seconds: seconds})
 	}
@@ -1094,10 +1102,14 @@ func (r *relay) handleWS(w http.ResponseWriter, req *http.Request) {
 
 	for {
 		ws.SetReadDeadline(time.Now().Add(idleReadTimeout))
-		_, data, err := ws.ReadMessage()
+		mt, data, err := ws.ReadMessage()
 		if err != nil {
 			c.endWith(classifyReadError(err))
 			return
+		}
+		if mt == websocket.BinaryMessage {
+			r.handleBinary(c, data)
+			continue
 		}
 		var m Msg
 		if err := json.Unmarshal(data, &m); err != nil {
@@ -1120,8 +1132,7 @@ func (r *relay) handleClientMsg(c *client, m Msg) {
 		if err != nil {
 			return
 		}
-		c.bytesOut.Add(int64(len(decoded)))
-		pc.enqueue(decoded)
+		c.deliverToPlayer(m.Conn, decoded)
 
 	case "close":
 		c.mu.Lock()
@@ -1209,6 +1220,20 @@ func (r *relay) acceptPlayers(c *client) {
 	}
 }
 
+// deliverToPlayer hands bytes the host sent for connection id to that player, counting them. It is the one place both the
+// JSON "data" frame and the binary frame end up, and it reports whether the connection exists.
+func (c *client) deliverToPlayer(id string, payload []byte) bool {
+	c.mu.Lock()
+	pc := c.players[id]
+	c.mu.Unlock()
+	if pc == nil {
+		return false
+	}
+	c.bytesOut.Add(int64(len(payload)))
+	pc.enqueue(payload)
+	return true
+}
+
 // admitPlayer registers a new player on the tunnel if the caps allow it: the tunnel-wide cap, and the per-source cap, where
 // a source is a limitKey (an IPv4 address, or an IPv6 /64 — one household, however many addresses it uses). Check and insert
 // are one critical section, so concurrent connections can't all see room and overrun the cap together.
@@ -1258,7 +1283,12 @@ func (r *relay) handlePlayer(c *client, conn net.Conn) {
 
 	c.send(Msg{Type: "connect", Conn: id, IP: host})
 
-	buf := make([]byte, 32*1024)
+	// The payload is read straight into buf after room for a binary frame's header, so a v2 tunnel needs no second copy.
+	raw, _ := rawID(id)
+	buf := make([]byte, frameHeaderLen+32*1024)
+	if c.bin {
+		putFrameHeader(buf, frameTCP, raw)
+	}
 	// A newly-connected player must send its first byte within
 	// initialPlayerInactivityTimeout (catches slot-squatting raw TCP
 	// connections that never speak Minecraft). After that, the read
@@ -1269,11 +1299,15 @@ func (r *relay) handlePlayer(c *client, conn net.Conn) {
 	deadline := c.rel.initialPlayerTimeout
 	for {
 		conn.SetReadDeadline(time.Now().Add(deadline))
-		n, err := conn.Read(buf)
+		n, err := conn.Read(buf[frameHeaderLen:])
 		if n > 0 {
 			deadline = c.rel.idlePlayerTimeout
 			c.bytesIn.Add(int64(n))
-			c.send(Msg{Type: "data", Conn: id, Data: base64.StdEncoding.EncodeToString(buf[:n])})
+			if c.bin {
+				c.sendFramed(buf[:frameHeaderLen+n])
+			} else {
+				c.send(Msg{Type: "data", Conn: id, Data: base64.StdEncoding.EncodeToString(buf[frameHeaderLen : frameHeaderLen+n])})
+			}
 		}
 		if err != nil {
 			break

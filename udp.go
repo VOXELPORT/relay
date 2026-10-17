@@ -33,6 +33,7 @@ const (
 
 type udpSession struct {
 	id       string
+	raw      [16]byte // id as the 16 bytes a binary frame carries
 	addr     *net.UDPAddr
 	host     string
 	lastSeen time.Time
@@ -91,7 +92,9 @@ func (c *client) startUDP() error {
 
 func (c *client) udpReadLoop() {
 	u := c.udp
-	buf := make([]byte, maxUDPDatagram)
+	// Datagrams are read after room for a binary frame's header, so a v2 tunnel can send the buffer as it is.
+	frame := make([]byte, frameHeaderLen+maxUDPDatagram)
+	buf := frame[frameHeaderLen:]
 	for {
 		n, addr, err := u.conn.ReadFromUDP(buf)
 		if err != nil {
@@ -128,7 +131,8 @@ func (c *client) udpReadLoop() {
 				u.mu.Unlock()
 				continue
 			}
-			s = &udpSession{id: id, addr: addr, host: host}
+			raw, _ := rawID(id)
+			s = &udpSession{id: id, raw: raw, addr: addr, host: host}
 			u.byAddr[addr.String()] = s
 			u.byID[id] = s
 			u.perIP[limitKey(host)]++
@@ -137,10 +141,15 @@ func (c *client) udpReadLoop() {
 		s.lastSeen = time.Now()
 		s.inPkts++
 		s.inBytes += int64(n)
-		id := s.id
+		id, raw := s.id, s.raw
 		u.mu.Unlock()
 
 		c.bytesIn.Add(int64(n))
+		if c.bin {
+			putFrameHeader(frame, frameUDP, raw)
+			c.sendFramed(frame[:frameHeaderLen+n])
+			continue
+		}
 		m := Msg{Type: "udp", Conn: id, Data: base64.StdEncoding.EncodeToString(buf[:n])}
 		if isNew {
 			m.IP = host
@@ -149,25 +158,31 @@ func (c *client) udpReadLoop() {
 	}
 }
 
-// handleHostUDP sends a host's datagram back to the session's player.
+// handleHostUDP sends a host's datagram (a JSON udp frame) back to the session's player.
 func (c *client) handleHostUDP(m Msg) {
-	u := c.udp
-	if u == nil {
+	data, err := base64.StdEncoding.DecodeString(m.Data)
+	if err != nil {
 		return
 	}
-	data, err := base64.StdEncoding.DecodeString(m.Data)
-	if err != nil || len(data) == 0 || len(data) > maxUDPDatagram {
-		return
+	c.deliverUDP(m.Conn, data)
+}
+
+// deliverUDP sends a datagram the host produced for session id to the player's address. Both the JSON udp frame and the
+// binary frame end up here. It reports false for an empty or over-size datagram, or a session that doesn't exist.
+func (c *client) deliverUDP(id string, data []byte) bool {
+	u := c.udp
+	if u == nil || len(data) == 0 || len(data) > maxUDPDatagram {
+		return false
 	}
 	u.mu.Lock()
-	s := u.byID[m.Conn]
+	s := u.byID[id]
 	if s == nil {
 		u.mu.Unlock()
-		return
+		return false
 	}
 	if s.inPkts < udpTrustPackets && s.outBytes+int64(len(data)) > udpPreTrustRatio*s.inBytes+udpPreTrustAllowance {
 		u.mu.Unlock()
-		return
+		return true // dropped on purpose (see udpPreTrustRatio), which is not a malformed frame
 	}
 	s.outBytes += int64(len(data))
 	addr := s.addr
@@ -176,6 +191,7 @@ func (c *client) handleHostUDP(m Msg) {
 	if _, err := u.conn.WriteToUDP(data, addr); err == nil {
 		c.bytesOut.Add(int64(len(data)))
 	}
+	return true
 }
 
 // closeUDPSession forgets a session; notifyHost tells the host it's gone.
