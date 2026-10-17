@@ -412,6 +412,8 @@ function renderDownloads() {
 
 // What the search box asks for. Kept here (not read from the box) so the list stays filtered when it redraws.
 let nameFilter = '';
+let namesExpanded = false; // the list shows a few addresses until asked for all of them
+const NAMES_SHOWN = 6;
 
 /** Does an address match the search? Every word typed must be found in its name, id, port or tags. */
 function matchesName(n, query) {
@@ -431,9 +433,17 @@ function renderNames() {
   const claimed = `${all.length} claimed${naOn() ? ` · ${rs.map((x) => `${x.label} ${x.r.names.length}`).join(' · ')}` : ''}`;
   $('#names-count').textContent = nameFilter.trim() ? `${names.length} of ${all.length} shown` : claimed;
   if (!all.length) { el.innerHTML = '<tr><td class="empty">Nobody has claimed an address yet.</td></tr>'; return; }
-  if (!names.length) { el.innerHTML = `<tr><td class="empty">No address matches “${esc(nameFilter.trim())}”.</td></tr>`; return; }
+  if (!names.length) { el.innerHTML = `<tr><td class="empty">No address matches “${esc(nameFilter.trim())}”.</td></tr>`; $('#names-more').innerHTML = ''; return; }
+  // Online first, then the most recently used: the few shown by default are the ones worth a look.
+  names.sort((a, b) => (b.online - a.online) || (new Date(b.last_seen) - new Date(a.last_seen)));
+  const shown = namesExpanded ? names : names.slice(0, NAMES_SHOWN);
+  const wrap = el.parentElement;
+  wrap.classList.toggle('scroll', namesExpanded && names.length > NAMES_SHOWN);
+  $('#names-more').innerHTML = names.length > NAMES_SHOWN
+    ? `<button type="button" class="btn sm ghost" id="names-toggle">${namesExpanded ? 'Show fewer' : `Show all ${names.length}`}</button>`
+    : '';
   el.innerHTML = `<thead><tr><th>Address</th><th class="r">Port</th><th>Last used</th><th class="r"></th></tr></thead><tbody>` +
-    names.map((n) => `<tr>
+    shown.map((n) => `<tr>
       <td><span class="dot ${n.online ? 'good' : ''}" style="display:inline-block;margin-right:6px"></span><b>${esc(n.name)}</b>${regionTag(n.region)}${n.supporter ? '<span class="tag supporter-tag">Supporter</span>' : ''}<div class="muted mono">id ${esc(n.id)} · since ${esc(new Date(n.created).toLocaleDateString())}</div></td>
       <td class="r num">${n.port}</td>
       <td>${n.online ? 'Online now' : esc(ago(n.last_seen))}${n.supporter ? '<div class="muted">kept: never expires</div>' : ''}</td>
@@ -506,6 +516,8 @@ function renderModeration() {
 }
 
 (() => {
+  const more = $('#names-more');
+  if (more) more.addEventListener('click', (e) => { if (e.target.closest('#names-toggle')) { namesExpanded = !namesExpanded; renderNames(); } });
   const box = $('#names-search');
   if (!box) return;
   box.addEventListener('input', () => { nameFilter = box.value; renderNames(); });

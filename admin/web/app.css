@@ -95,6 +95,9 @@ h2 { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: .01em; }
 
 /* Tables */
 .table-wrap { overflow-x: auto; }
+.table-wrap.scroll { max-height: 420px; overflow-y: auto; }
+.table-wrap.scroll .table th { position: sticky; top: 0; background: var(--surface); }
+.table-more { padding: 8px 10px 2px; }
 .table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .table th { text-align: left; font-weight: 600; font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; padding: 6px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
 .table td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
