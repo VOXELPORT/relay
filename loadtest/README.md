@@ -41,3 +41,9 @@ you make up for the test; there's nothing to revoke or delete afterward. Its
 only persistent trace is the relay's in-memory sticky-port mapping, which is
 forgotten automatically once the token has been disconnected for longer than
 the sticky-port TTL (see relay.go's `stickyPortTTL`).
+
+## Throughput tests
+
+`loadgen/` (the generator behind these tests) also has a throughput mode: `-bytes-per-sec N` per player, timestamped
+frames with the echo timed (p50/p99), `-bin` for protocol v2 and `-relay-pid` to see the relay's CPU and memory. See
+[THROUGHPUT.md](THROUGHPUT.md) for ready-to-run recipes and how to read the results.

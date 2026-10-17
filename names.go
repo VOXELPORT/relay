@@ -20,8 +20,12 @@ import (
 // (_minecraft._tcp.steve → play.voxelport.in:<port>, which Java clients
 // follow) and a CNAME (steve → play.voxelport.in, so Bedrock players can type
 // the name plus the port). Because DNS points at a fixed port, a claimed name
-// permanently reserves that port for its token, even while the host is
-// offline, until the name is released or expires from disuse.
+// reserves that port for its token while the host is away, for the port grace
+// period (a week by default) after it was last seen. After that the port goes back
+// to the pool; when the host returns and the port is taken, it gets another one and
+// the DNS record follows it, so the address players use doesn't change. A name
+// itself lives much longer (nameExpiry), and supporters' and granted addresses keep
+// their port for good.
 
 const (
 	nameExpiry          = 60 * 24 * time.Hour // unused this long → released
@@ -30,6 +34,18 @@ const (
 	nameClaimWindow     = 10 * time.Minute    // …per this window
 	nameDNSTimeout      = 20 * time.Second
 	nameExpirySweepTick = 24 * time.Hour
+
+	// How long a name keeps its port reserved after its host was last seen (-name-port-grace).
+	defaultNamePortGrace = 7 * 24 * time.Hour
+	// At most this share of the port range may be reserved by custom addresses (-max-reserved-port-fraction),
+	// so offline names can never starve the hosts that are online.
+	defaultMaxReservedFraction = 0.5
+	// Successful new claims per source address per day, for IPv4 and for an IPv6 /64 (see limitKey).
+	defaultNameClaimsPerIPDay  = 10
+	defaultNameClaimsPerIPDay6 = 3
+	nameClaimsDay              = 24 * time.Hour
+	// Writing LastSeen to disk when a host disconnects is skipped if the file was written this recently.
+	nameCloseSaveEvery = 5 * time.Minute
 )
 
 var namePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{1,18}[a-z0-9])$`)
@@ -144,6 +160,16 @@ type nameStore struct {
 	byPort   map[int]string // port -> clientID
 	attempts map[string][]time.Time
 
+	// Capacity rules (see nameLimits). Zero values mean the defaults above.
+	grace               time.Duration
+	maxReservedFraction float64
+	poolSize            int // ports in the relay's range; 0 = unknown, so no cap
+	keep                func(clientID, name string) bool
+	claimsPerIPDay      int
+	claimsPerIPDay6     int
+	ipClaims            map[string][]time.Time // limitKey -> times of successful new claims in the last day
+	lastSaved           time.Time
+
 	// dnsMu serialises every operation that talks to DNS, so two claims for
 	// the same name can't both pass the availability check.
 	dnsMu sync.Mutex
@@ -159,6 +185,7 @@ func loadNameStore(path, domain string, dns dnsProvider) (*nameStore, error) {
 		byClient: map[string]*nameEntry{},
 		byPort:   map[int]string{},
 		attempts: map[string][]time.Time{},
+		ipClaims: map[string][]time.Time{},
 	}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -188,6 +215,60 @@ func loadNameStore(path, domain string, dns dnsProvider) (*nameStore, error) {
 	return s, nil
 }
 
+// nameLimits are the capacity rules of the store; the relay sets them once at start.
+type nameLimits struct {
+	Grace               time.Duration                    // how long an absent host keeps its port
+	MaxReservedFraction float64                          // share of the range names may reserve
+	PoolSize            int                              // ports in the range
+	Keep                func(clientID, name string) bool // supporters: port kept for good, and exempt from the cap
+	ClaimsPerIPDay      int                              // new claims per IPv4 address per day
+	ClaimsPerIPDay6     int                              // new claims per IPv6 /64 per day
+}
+
+func (s *nameStore) configure(l nameLimits) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.grace, s.maxReservedFraction, s.poolSize, s.keep = l.Grace, l.MaxReservedFraction, l.PoolSize, l.Keep
+	s.claimsPerIPDay, s.claimsPerIPDay6 = l.ClaimsPerIPDay, l.ClaimsPerIPDay6
+}
+
+// The effective rules, with defaults for anything left at zero. Callers hold s.mu.
+func (s *nameStore) graceLocked() time.Duration {
+	if s.grace <= 0 {
+		return defaultNamePortGrace
+	}
+	return s.grace
+}
+
+func (s *nameStore) fractionLocked() float64 {
+	if s.maxReservedFraction <= 0 {
+		return defaultMaxReservedFraction
+	}
+	return s.maxReservedFraction
+}
+
+func (s *nameStore) claimsPerDayLocked(key string) int {
+	if isIPv6Key(key) {
+		if s.claimsPerIPDay6 > 0 {
+			return s.claimsPerIPDay6
+		}
+		return defaultNameClaimsPerIPDay6
+	}
+	if s.claimsPerIPDay > 0 {
+		return s.claimsPerIPDay
+	}
+	return defaultNameClaimsPerIPDay
+}
+
+// reservesLocked reports whether e's port is held for it right now: always for a supporter or a granted
+// address, otherwise for the grace period after the host was last seen. Callers hold s.mu.
+func (s *nameStore) reservesLocked(e *nameEntry, now time.Time) bool {
+	if e.Granted || (s.keep != nil && s.keep(e.ClientID, e.Name)) {
+		return true
+	}
+	return now.Sub(e.LastSeen) <= s.graceLocked()
+}
+
 func (s *nameStore) index(e *nameEntry) {
 	s.byName[e.Name] = e
 	s.byClient[e.ClientID] = e
@@ -204,6 +285,7 @@ func (s *nameStore) unindex(e *nameEntry) {
 
 // saveLocked writes the store atomically. Callers hold s.mu.
 func (s *nameStore) saveLocked() error {
+	s.lastSaved = time.Now()
 	entries := make([]*nameEntry, 0, len(s.byName))
 	for _, e := range s.byName {
 		entries = append(entries, e)
@@ -243,11 +325,68 @@ func (s *nameStore) nameFor(clientID string) string {
 	return e.Name
 }
 
-// portOwner returns the client whose custom address reserves port, or "".
+// portOwner returns the client whose custom address points at port, or "" (whether or not it is still reserved).
 func (s *nameStore) portOwner(port int) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.byPort[port]
+}
+
+// portHeldFrom reports whether port is reserved for somebody other than clientID: its name's owner is a supporter
+// or has a granted address, or was last seen within the grace period. A port whose owner has been away longer
+// is free for anyone.
+func (s *nameStore) portHeldFrom(port int, clientID string, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	owner := s.byPort[port]
+	if owner == "" || owner == clientID {
+		return false
+	}
+	e := s.byClient[owner]
+	return e != nil && s.reservesLocked(e, now)
+}
+
+// reservedCount is how many names hold their port right now.
+func (s *nameStore) reservedCount(now time.Time) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reservedCountLocked(now)
+}
+
+func (s *nameStore) reservedCountLocked(now time.Time) int {
+	n := 0
+	for _, e := range s.byName {
+		if s.reservesLocked(e, now) {
+			n++
+		}
+	}
+	return n
+}
+
+// recentClaimsLocked is the successful new claims from key within the last day (older ones are dropped). Callers hold s.mu.
+func (s *nameStore) recentClaimsLocked(key string, now time.Time) []time.Time {
+	kept := s.ipClaims[key][:0]
+	for _, t := range s.ipClaims[key] {
+		if now.Sub(t) < nameClaimsDay {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) == 0 {
+		delete(s.ipClaims, key)
+	} else {
+		s.ipClaims[key] = kept
+	}
+	return kept
+}
+
+// sweepIPClaims drops source addresses with no claims in the last day, so the map can't grow under address-rotating abuse.
+func (s *nameStore) sweepIPClaims() {
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key := range s.ipClaims {
+		s.recentClaimsLocked(key, now)
+	}
 }
 
 func (s *nameStore) allowAttempt(clientID string) bool {
@@ -272,16 +411,21 @@ func (s *nameStore) allowAttempt(clientID string) bool {
 // its live tunnel holds right now). A client has at most one name; claiming
 // a new one releases the old.
 func (s *nameStore) claim(clientID, name string, port int) (nameEntry, error) {
-	return s.claimName(clientID, name, port, false)
+	return s.claimName(clientID, "", name, port, false)
+}
+
+// claimFrom is claim, counting the claim against the host's source address (see limitKey).
+func (s *nameStore) claimFrom(clientID, ip, name string, port int) (nameEntry, error) {
+	return s.claimName(clientID, ip, name, port, false)
 }
 
 // grantShort gives clientID a 1–2 character address. Only the operator can do this
 // (the dashboard's "Short name" action); hosts can't claim one themselves.
 func (s *nameStore) grantShort(clientID, name string, port int) (nameEntry, error) {
-	return s.claimName(clientID, name, port, true)
+	return s.claimName(clientID, "", name, port, true)
 }
 
-func (s *nameStore) claimName(clientID, name string, port int, short bool) (nameEntry, error) {
+func (s *nameStore) claimName(clientID, ip, name string, port int, short bool) (nameEntry, error) {
 	name = strings.ToLower(strings.TrimSpace(name))
 	check := validateName
 	if short {
@@ -340,6 +484,31 @@ func (s *nameStore) claimName(clientID, name string, port int, short bool) (name
 		return out, nil
 	}
 
+	// A brand-new name from here on. The operator's grants and supporters are exempt from the capacity rules; everyone
+	// else is held to the share of the port range names may reserve, and to a daily limit per source address, so a few
+	// scripts can't squat the pool.
+	now := time.Now()
+	key := ""
+	if !short && ip != "" {
+		key = limitKey(ip)
+	}
+	if !short {
+		s.mu.Lock()
+		exempt := s.keep != nil && s.keep(clientID, name)
+		full := !exempt && old == nil && s.poolSize > 0 && float64(s.reservedCountLocked(now)) >= s.fractionLocked()*float64(s.poolSize)
+		over := false
+		if key != "" && !exempt {
+			over = len(s.recentClaimsLocked(key, now)) >= s.claimsPerDayLocked(key)
+		}
+		s.mu.Unlock()
+		if full {
+			return nameEntry{}, errors.New("Custom addresses are full right now — try again later.")
+		}
+		if over {
+			return nameEntry{}, errors.New("Too many custom addresses were claimed from your network today — try again tomorrow.")
+		}
+	}
+
 	taken, err := s.dns.Exists(ctx, name)
 	if err != nil {
 		log.Printf("[names] lookup %s: %v", name, err)
@@ -354,13 +523,16 @@ func (s *nameStore) claimName(clientID, name string, port int, short bool) (name
 		return nameEntry{}, errors.New("Couldn't set up that address right now — try again shortly.")
 	}
 
-	now := time.Now()
+	now = time.Now()
 	e := &nameEntry{Name: name, ClientID: clientID, Port: port, Records: records, Created: now, LastSeen: now, Granted: short}
 	s.mu.Lock()
 	if old != nil {
 		s.unindex(old)
 	}
 	s.index(e)
+	if key != "" {
+		s.ipClaims[key] = append(s.recentClaimsLocked(key, now), now)
+	}
 	if err := s.saveLocked(); err != nil {
 		log.Printf("[names] save: %v", err)
 	}
@@ -439,6 +611,22 @@ func (s *nameStore) touch(clientID string) {
 	s.saveLocked()
 }
 
+// touchClosed records that clientID's host has just gone away, which is when its port grace starts counting. LastSeen is
+// only written on connect (and hourly), so without this a host that stayed online for days would have its port released
+// the moment it dropped. The change is kept in memory at once and written to disk at most every few minutes.
+func (s *nameStore) touchClosed(clientID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e := s.byClient[clientID]
+	if e == nil {
+		return
+	}
+	e.LastSeen = time.Now()
+	if time.Since(s.lastSaved) >= nameCloseSaveEvery {
+		s.saveLocked()
+	}
+}
+
 // sweepExpired releases names unused for longer than maxAge. isLive reports
 // whether a client currently has a tunnel up (those are never expired).
 func (s *nameStore) sweepExpired(maxAge time.Duration, isLive func(clientID string) bool) {
@@ -465,6 +653,7 @@ func (s *nameStore) sweepExpiredKeeping(maxAge time.Duration, isLive func(client
 
 func (r *relay) nameSweepLoop() {
 	for range time.Tick(nameExpirySweepTick) {
+		r.names.sweepIPClaims()
 		r.names.sweepExpiredKeeping(nameExpiry, func(id string) bool {
 			r.mu.Lock()
 			defer r.mu.Unlock()

@@ -37,7 +37,7 @@ sudo systemctl reload caddy
 
 ```bash
 sudo ufw allow 443/tcp            # wss:// control connection (via Caddy)
-sudo ufw allow 25500:25999/tcp    # public Minecraft player ports
+sudo ufw allow 25500:29999/tcp    # public Minecraft player ports (4,500 of them)
 ```
 
 ## 5. Install the service  (VPS)
@@ -49,8 +49,11 @@ sudo systemctl enable --now voxelport-relay
 sudo systemctl status voxelport-relay
 ```
 
-The unit runs `voxelport-relay -listen 127.0.0.1:2526 -min-port 25500 -max-port 25999`.
-Edit the `ExecStart` line to change the port range.
+The unit runs `voxelport-relay -listen 127.0.0.1:2526 -min-port 25500 -max-port 29999`.
+Edit the `ExecStart` line to change the port range. Port 25565 (Minecraft's own default) is never handed out
+(`-reserved-ports`), so a Minecraft server on the same machine can keep it. Anything else you run on this machine
+that listens inside the range should be added to `-reserved-ports` too, as should the port of a
+`-direct-listen` listener if you place it inside the range.
 
 ## 6. Verify
 
@@ -74,3 +77,21 @@ Then start a host (mod or desktop app) — it should print a
 - The service stops via `systemctl stop` (SIGTERM) cleanly and quickly — it
   drains active tunnels itself before exiting, no forced kill needed under
   normal conditions.
+
+## Upgrading to the capacity release
+
+The release is backward compatible: apps and the mod that are already out keep working against it unchanged, and protocol
+v2 (binary data frames) is opt-in per host. Do it in this order:
+
+1. **Deploy the new relay binary first** (`go build`, copy it over, `systemctl restart voxelport-relay`). Existing flags
+   keep working: `-min-port`/`-max-port` and `-max-tunnels-per-ip`/`-max-players-per-ip` now mean the IPv4 values, and
+   `names.json` and the other files in `-data-dir` load as they are. A restart makes every host reconnect (they do it by
+   themselves within seconds).
+2. **Then open the router and firewall for the wider range**, if you widen it: forward and allow `25500-29999` (TCP, and
+   UDP if you serve Bedrock players), or the range you chose.
+3. **Then ship client updates** that ask for protocol v2 (the desktop app's `feat/protocol-v2`).
+
+If your unit passes explicit `-min-port`/`-max-port` (the defaults only matter for a fresh install), widen the range by
+changing those two flags. Keep anything else that listens inside your range out of the pool with `-reserved-ports`
+(Minecraft's own 25565 is already reserved by default). A `-direct-listen` or `-listen` port inside the range must be listed
+there too, or the relay refuses to start and says so.

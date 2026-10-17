@@ -36,6 +36,10 @@ import (
 // host has a custom address, now points straight at it; port 0 means players use the relay again),
 // direct_error{message} (Direct mode was refused or stopped working).
 //
+// Protocol v2 (frames.go): a host that registers with bin:1 and is answered with bin:1 in the port frame sends and
+// receives TCP and UDP payloads as binary WebSocket messages instead of base64 inside "data" and "udp" frames. Control
+// frames stay JSON.
+//
 // The udp, name and listing frames are additive: an older client never
 // sends udp/claim_name/listing and never receives udp, name or listing frames
 // unless it asked, so existing mod/app versions keep working unchanged.
@@ -64,6 +68,9 @@ type Msg struct {
 	Peer   string `json:"peer,omitempty"`
 	Signal string `json:"signal,omitempty"`
 	P2P    *bool  `json:"p2p,omitempty"`
+	// Bin asks for (in register) and confirms (in port) protocol v2: payloads as binary frames. Older clients never send
+	// it and ignore it in port, so they keep getting JSON.
+	Bin int `json:"bin,omitempty"`
 }
 
 // tokenPattern accepts the auto-generated device tokens produced by the mod/app.
@@ -98,10 +105,20 @@ const (
 	maxPlayersPerTunnel = 256
 
 	// regLimitMax/regLimitWindow bound how many registration attempts a
-	// single source IP may make, to blunt scripted abuse of the
+	// single source may make, to blunt scripted abuse of the
 	// intentionally accountless /ws endpoint (fake-tunnel port exhaustion).
-	regLimitMax    = 10
+	// "Source" is a limitKey: an IPv4 address (shared by thousands of people
+	// behind carrier-grade NAT, hence the room) or an IPv6 /64 (one household).
+	regLimitMax    = 30
+	regLimitMax6   = 10
 	regLimitWindow = time.Minute
+
+	// Defaults for the other per-source limits: active tunnels, and players per
+	// tunnel. Same key rules as above; IPv6 is lower because one /64 is one site.
+	defaultMaxTunnelsPerIP        = 25
+	defaultMaxTunnelsPerIP6       = 5
+	defaultMaxPlayersPerIPTunnel  = 32
+	defaultMaxPlayersPerIPTunnel6 = 16
 
 	// playerOutboxSize bounds how many not-yet-written host->player messages
 	// may queue up per player before that player is considered unable to
@@ -266,22 +283,25 @@ type client struct {
 
 	mu        sync.Mutex
 	players   map[string]*playerConn
-	ipCounts  map[string]int // source IP -> active player connections on this tunnel
+	ipCounts  map[string]int // limitKey(source IP) -> active player connections on this tunnel
 	blocked   map[string]bool
 	closeOnce sync.Once
 
 	peers      map[string]*joiner // players waiting to connect peer-to-peer (join.go; guarded by mu)
-	direct     *directState  // Direct mode (guarded by mu); nil unless the host turned it on and it was verified
-	directAsks []time.Time    // when the host last asked for Direct mode (guarded by mu), to rate-limit it
-	closed     chan struct{} // closed when the tunnel is torn down
+	direct     *directState       // Direct mode (guarded by mu); nil unless the host turned it on and it was verified
+	directAsks []time.Time        // when the host last asked for Direct mode (guarded by mu), to rate-limit it
+	closed     chan struct{}      // closed when the tunnel is torn down
 
-	udp     *udpState // non-nil when the host asked for Bedrock (UDP) forwarding
-	listing *Listing  // public server-list entry, nil unless the host opted in (guarded by mu)
+	udp *udpState // non-nil when the host asked for Bedrock (UDP) forwarding
+	bin bool      // protocol v2: payloads travel as binary frames (set before the tunnel is published, never changed)
 
-	name   string // app and version the host reported (cleaned), for the log only
-	route  string // "direct" (the relay's own TLS listener) or "tunnel" (behind Cloudflare Tunnel or a proxy)
-	endMu  sync.Mutex
-	ended  string // why the tunnel ended; the first reason to be set wins
+	badFrameAt atomic.Int64 // when a malformed binary frame was last logged (unix nanoseconds), to rate-limit the log
+	listing    *Listing     // public server-list entry, nil unless the host opted in (guarded by mu)
+
+	name  string // app and version the host reported (cleaned), for the log only
+	route string // "direct" (the relay's own TLS listener) or "tunnel" (behind Cloudflare Tunnel or a proxy)
+	endMu sync.Mutex
+	ended string // why the tunnel ended; the first reason to be set wins
 
 	// Usage metering — the foundation for per-token limits / billing.
 	startedAt   time.Time    // when this tunnel registered (read-only)
@@ -317,15 +337,8 @@ func (c *client) endReason() string {
 // recover a broken control channel, so leaving it half-alive would just leak
 // resources and confuse the host.
 func (c *client) send(m Msg) {
-	c.writeMu.Lock()
 	data, _ := json.Marshal(m)
-	c.ws.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
-	err := c.ws.WriteMessage(websocket.TextMessage, data)
-	c.writeMu.Unlock()
-	if err != nil {
-		c.endWith(endSendFailed)
-		c.close(c.rel)
-	}
+	c.writeFrame(websocket.TextMessage, data)
 }
 
 // relay is the multi-tenant hub. Every host token maps to at most one live tunnel.
@@ -334,7 +347,7 @@ type relay struct {
 	clients   map[string]*client        // clientID -> live client
 	portByID  map[string]stickyPortInfo // clientID -> last assigned port + when it was last used
 	usedPort  map[int]bool              // reserved/in-use public ports
-	ipTunnels map[string]int            // source IP -> count of currently-active tunnels
+	ipTunnels map[string]int            // limitKey(source IP) -> count of currently-active tunnels
 
 	// regSerialize makes the whole "evict any previous tunnel for this
 	// token -> check per-IP tunnel limit -> reserve a port -> publish the
@@ -346,11 +359,15 @@ type relay struct {
 	// and "the per-IP tunnel limit can't be bypassed by racing requests".
 	regSerialize sync.Mutex
 
-	minPort int
-	maxPort int
+	minPort  int
+	maxPort  int
+	reserved map[int]bool // ports in the range that tunnels must never take (see relayConfig.ReservedPorts)
 
-	maxTunnelsPerIP       int
-	maxPlayersPerIPTunnel int
+	// Per-source limits, each with an IPv4 value and a lower IPv6 /64 value (see limitKey).
+	maxTunnelsPerIP        int
+	maxTunnelsPerIP6       int
+	maxPlayersPerIPTunnel  int
+	maxPlayersPerIPTunnel6 int
 
 	// Overridable for tests (real 30s/10m windows would make tests slow);
 	// production always gets the package-level defaults via newRelay.
@@ -510,6 +527,19 @@ func (r *relay) liveClients() []*client {
 	return out
 }
 
+// countIn is how many of ports lie within [lo, hi].
+func countIn(ports []int, lo, hi int) int {
+	n := 0
+	seen := map[int]bool{}
+	for _, p := range ports {
+		if p >= lo && p <= hi && !seen[p] {
+			seen[p] = true
+			n++
+		}
+	}
+	return n
+}
+
 // stickyPortInfo remembers which port a token last used, and when, so a
 // reconnect can be handed the same port back and so stale entries can
 // eventually be forgotten (see stickyPortTTL).
@@ -531,15 +561,29 @@ type relayConfig struct {
 	MinPort               int
 	MaxPort               int
 	TokenSecret           string
-	MaxTunnelsPerIP       int
-	MaxPlayersPerIPTunnel int
+	MaxTunnelsPerIP       int // per IPv4 address
+	MaxPlayersPerIPTunnel int // per IPv4 address, per tunnel
 	TrustedProxies        []*net.IPNet
+
+	// The IPv6 /64 counterparts, and the registration limit per minute (zero = the default).
+	MaxTunnelsPerIP6       int
+	MaxPlayersPerIPTunnel6 int
+	RegLimitIP             int
+	RegLimitIP6            int
 
 	Names      *nameStore
 	Join       *joinHub
 	PublicHost string
 	Hidden     *hiddenList
 	Supporters *supporterList
+
+	// Capacity rules for custom addresses (zero = the default in names.go).
+	NamePortGrace           time.Duration // how long an absent host keeps its name's port
+	MaxReservedPortFraction float64       // share of the port range names may reserve
+	NameClaimsPerIPDay      int           // new claims per IPv4 address per day
+	NameClaimsPerIPDay6     int           // new claims per IPv6 /64 per day
+	// ReservedPorts are inside the range but never handed to a tunnel: ports other programs on the machine use.
+	ReservedPorts []int
 
 	// Zero means "use the production default" — only tests need to set these.
 	InitialPlayerTimeout time.Duration
@@ -555,29 +599,51 @@ func newRelay(cfg relayConfig) *relay {
 	if idleTimeout == 0 {
 		idleTimeout = playerIdleTimeout
 	}
+	orDefault := func(v, def int) int {
+		if v > 0 {
+			return v
+		}
+		return def
+	}
 	r := &relay{
-		clients:               make(map[string]*client),
-		portByID:              make(map[string]stickyPortInfo),
-		usedPort:              make(map[int]bool),
-		ipTunnels:             make(map[string]int),
-		minPort:               cfg.MinPort,
-		maxPort:               cfg.MaxPort,
-		tokenSecret:           cfg.TokenSecret,
-		maxTunnelsPerIP:       cfg.MaxTunnelsPerIP,
-		maxPlayersPerIPTunnel: cfg.MaxPlayersPerIPTunnel,
-		trustedProxies:        cfg.TrustedProxies,
-		initialPlayerTimeout:  initialTimeout,
-		idlePlayerTimeout:     idleTimeout,
-		regLimiter:            newRegLimiter(),
-		names:                 cfg.Names,
-		join:                  cfg.Join,
-		publicHost:            cfg.PublicHost,
-		hidden:                cfg.Hidden,
-		supporters:            cfg.Supporters,
-		startedAt:             time.Now(),
+		clients:                make(map[string]*client),
+		portByID:               make(map[string]stickyPortInfo),
+		usedPort:               make(map[int]bool),
+		ipTunnels:              make(map[string]int),
+		minPort:                cfg.MinPort,
+		maxPort:                cfg.MaxPort,
+		reserved:               map[int]bool{},
+		tokenSecret:            cfg.TokenSecret,
+		maxTunnelsPerIP:        orDefault(cfg.MaxTunnelsPerIP, defaultMaxTunnelsPerIP),
+		maxTunnelsPerIP6:       orDefault(cfg.MaxTunnelsPerIP6, defaultMaxTunnelsPerIP6),
+		maxPlayersPerIPTunnel:  orDefault(cfg.MaxPlayersPerIPTunnel, defaultMaxPlayersPerIPTunnel),
+		maxPlayersPerIPTunnel6: orDefault(cfg.MaxPlayersPerIPTunnel6, defaultMaxPlayersPerIPTunnel6),
+		trustedProxies:         cfg.TrustedProxies,
+		initialPlayerTimeout:   initialTimeout,
+		idlePlayerTimeout:      idleTimeout,
+		regLimiter:             newRegLimiter(orDefault(cfg.RegLimitIP, regLimitMax), orDefault(cfg.RegLimitIP6, regLimitMax6)),
+		names:                  cfg.Names,
+		join:                   cfg.Join,
+		publicHost:             cfg.PublicHost,
+		hidden:                 cfg.Hidden,
+		supporters:             cfg.Supporters,
+		startedAt:              time.Now(),
 	}
 	if r.publicHost == "" {
 		r.publicHost = "localhost"
+	}
+	for _, p := range cfg.ReservedPorts {
+		r.reserved[p] = true
+	}
+	if r.names != nil {
+		r.names.configure(nameLimits{
+			Grace:               cfg.NamePortGrace,
+			MaxReservedFraction: cfg.MaxReservedPortFraction,
+			PoolSize:            cfg.MaxPort - cfg.MinPort + 1 - countIn(cfg.ReservedPorts, cfg.MinPort, cfg.MaxPort),
+			Keep:                r.supporters.has,
+			ClaimsPerIPDay:      cfg.NameClaimsPerIPDay,
+			ClaimsPerIPDay6:     cfg.NameClaimsPerIPDay6,
+		})
 	}
 	go r.sweepLoop()
 	return r
@@ -625,12 +691,16 @@ func newID() (string, error) {
 // Callers must already hold r.regSerialize.
 func (r *relay) reservePort(clientID string) (net.Listener, int, error) {
 	tryBind := func(port int) (net.Listener, bool) {
-		// A port behind someone else's custom address stays theirs even while
-		// they're offline, or their DNS record would point at a stranger.
-		if r.names != nil {
-			if owner := r.names.portOwner(port); owner != "" && owner != clientID {
-				return nil, false
-			}
+		// Ports other programs on this machine use are never handed out.
+		if r.reserved[port] {
+			return nil, false
+		}
+		// A port behind someone else's custom address stays theirs while its host is away, for the port
+		// grace period (always, for a supporter or a granted address): otherwise the address's DNS record
+		// would point at a stranger. Once the grace has passed, the port is free for anyone, and the host
+		// gets another when it returns (and its DNS record follows).
+		if r.names != nil && r.names.portHeldFrom(port, clientID, time.Now()) {
+			return nil, false
 		}
 		r.mu.Lock()
 		if r.usedPort[port] {
@@ -680,42 +750,63 @@ func (r *relay) releasePort(port int) {
 	r.mu.Unlock()
 }
 
-// addTunnel/removeTunnel keep the per-IP active-tunnel count consistent.
+// tunnelLimit is how many active tunnels the source ip may have: the IPv4 limit, or the lower IPv6 /64 one.
+func (r *relay) tunnelLimit(ip string) int {
+	if isIPv6Key(limitKey(ip)) {
+		return r.maxTunnelsPerIP6
+	}
+	return r.maxTunnelsPerIP
+}
+
+// playerLimit is how many players one source may have on a single tunnel.
+func (r *relay) playerLimit(key string) int {
+	if isIPv6Key(key) {
+		return r.maxPlayersPerIPTunnel6
+	}
+	return r.maxPlayersPerIPTunnel
+}
+
+// addTunnel/removeTunnel keep the per-source active-tunnel count consistent (counted per limitKey).
 // Both must be called while holding r.regSerialize (addTunnel, as part of
 // registration) or are safe to call any time for removeTunnel (it only ever
 // decrements its own client's own recorded IP).
 func (r *relay) addTunnel(ip string) {
+	key := limitKey(ip)
 	r.mu.Lock()
-	r.ipTunnels[ip]++
+	r.ipTunnels[key]++
 	r.mu.Unlock()
 }
 
 func (r *relay) removeTunnel(ip string) {
+	key := limitKey(ip)
 	r.mu.Lock()
-	if r.ipTunnels[ip] > 0 {
-		r.ipTunnels[ip]--
-		if r.ipTunnels[ip] == 0 {
-			delete(r.ipTunnels, ip)
+	if r.ipTunnels[key] > 0 {
+		r.ipTunnels[key]--
+		if r.ipTunnels[key] == 0 {
+			delete(r.ipTunnels, key)
 		}
 	}
 	r.mu.Unlock()
 }
 
 func (r *relay) tunnelsForIP(ip string) int {
+	key := limitKey(ip)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.ipTunnels[ip]
+	return r.ipTunnels[key]
 }
 
 // regLimiter tracks registration attempts per source IP so a script can't
 // exhaust the (small, fixed) port pool by opening many fake tunnels.
 type regLimiter struct {
 	mu       sync.Mutex
-	attempts map[string][]time.Time
+	attempts map[string][]time.Time // limitKey -> attempt times within the window
+	max4     int                    // attempts per window for an IPv4 address
+	max6     int                    // ...for an IPv6 /64
 }
 
-func newRegLimiter() *regLimiter {
-	l := &regLimiter{attempts: make(map[string][]time.Time)}
+func newRegLimiter(max4, max6 int) *regLimiter {
+	l := &regLimiter{attempts: make(map[string][]time.Time), max4: max4, max6: max6}
 	go func() {
 		for range time.Tick(regLimitWindow) {
 			l.sweep()
@@ -727,21 +818,26 @@ func newRegLimiter() *regLimiter {
 // allow reports whether ip may attempt another registration now, recording
 // the attempt if so.
 func (l *regLimiter) allow(ip string) bool {
+	key := limitKey(ip)
+	max := l.max4
+	if isIPv6Key(key) {
+		max = l.max6
+	}
 	now := time.Now()
 	cutoff := now.Add(-regLimitWindow)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	kept := l.attempts[ip][:0]
-	for _, t := range l.attempts[ip] {
+	kept := l.attempts[key][:0]
+	for _, t := range l.attempts[key] {
 		if t.After(cutoff) {
 			kept = append(kept, t)
 		}
 	}
-	if len(kept) >= regLimitMax {
-		l.attempts[ip] = kept
+	if len(kept) >= max {
+		l.attempts[key] = kept
 		return false
 	}
-	l.attempts[ip] = append(kept, now)
+	l.attempts[key] = append(kept, now)
 	return true
 }
 
@@ -857,7 +953,7 @@ func (r *relay) handleWS(w http.ResponseWriter, req *http.Request) {
 	}
 	ip := r.clientIP(req)
 	if !r.regLimiter.allow(ip) {
-		sendErr(ws, "too many registration attempts, try again later")
+		sendErr(ws, "Too many connection attempts from your network in the last minute — wait a minute and try again. If you're on mobile data, try Wi-Fi.")
 		ws.Close()
 		return
 	}
@@ -907,10 +1003,10 @@ func (r *relay) handleWS(w http.ResponseWriter, req *http.Request) {
 		old.close(r)
 	}
 
-	if r.tunnelsForIP(ip) >= r.maxTunnelsPerIP {
+	if limit := r.tunnelLimit(ip); r.tunnelsForIP(ip) >= limit {
 		r.regSerialize.Unlock()
 		log.Printf("[relay] refused: token %s… client=%s: too many active tunnels from one address", clientID[:8], clientName)
-		sendErr(ws, fmt.Sprintf("too many active tunnels from this address (max %d)", r.maxTunnelsPerIP))
+		sendErr(ws, fmt.Sprintf("Too many VoxelPort servers are online from your network right now (limit %d). If you're on mobile data, try Wi-Fi.", limit))
 		ws.Close()
 		return
 	}
@@ -939,6 +1035,7 @@ func (r *relay) handleWS(w http.ResponseWriter, req *http.Request) {
 		route:      route,
 		closed:     make(chan struct{}),
 		peers:      make(map[string]*joiner),
+		bin:        reg.Bin == 1,
 	}
 	for _, blockedIP := range reg.BlockedIPs {
 		c.blocked[blockedIP] = true
@@ -965,7 +1062,11 @@ func (r *relay) handleWS(w http.ResponseWriter, req *http.Request) {
 
 	r.regSerialize.Unlock()
 
-	c.send(Msg{Type: "port", Port: port})
+	portReply := Msg{Type: "port", Port: port}
+	if c.bin {
+		portReply.Bin = 1 // both sides now speak protocol v2 (binary payload frames)
+	}
+	c.send(portReply)
 	if message, seconds, ok := r.activeNotice(); ok {
 		c.send(Msg{Type: "notice", Message: message, Seconds: seconds})
 	}
@@ -1017,6 +1118,9 @@ func (r *relay) handleWS(w http.ResponseWriter, req *http.Request) {
 			r.portByID[clientID] = info
 		}
 		r.mu.Unlock()
+		if r.names != nil {
+			r.names.touchClosed(clientID) // the port grace counts from now
+		}
 		// Durable per-session usage record (retained in journald/syslog — parse for billing).
 		// ended= says why it ended (see the end* codes), client= and route= say what connected.
 		log.Printf("[usage] token=%s port=%d uptime=%s conns=%d peak_players=%d in=%s out=%s ended=%s client=%s route=%s",
@@ -1027,10 +1131,14 @@ func (r *relay) handleWS(w http.ResponseWriter, req *http.Request) {
 
 	for {
 		ws.SetReadDeadline(time.Now().Add(idleReadTimeout))
-		_, data, err := ws.ReadMessage()
+		mt, data, err := ws.ReadMessage()
 		if err != nil {
 			c.endWith(classifyReadError(err))
 			return
+		}
+		if mt == websocket.BinaryMessage {
+			r.handleBinary(c, data)
+			continue
 		}
 		var m Msg
 		if err := json.Unmarshal(data, &m); err != nil {
@@ -1053,17 +1161,14 @@ func (r *relay) handleClientMsg(c *client, m Msg) {
 		if err != nil {
 			return
 		}
-		c.bytesOut.Add(int64(len(decoded)))
-		pc.enqueue(decoded)
+		c.deliverToPlayer(m.Conn, decoded)
 
 	case "close":
 		c.mu.Lock()
 		pc := c.players[m.Conn]
 		delete(c.players, m.Conn)
 		if pc != nil {
-			if host := pc.remoteHost(); c.ipCounts[host] > 0 {
-				c.ipCounts[host]--
-			}
+			c.releasePlayerCountLocked(pc.remoteHost())
 		}
 		c.mu.Unlock()
 		if pc != nil {
@@ -1087,7 +1192,7 @@ func (r *relay) handleClientMsg(c *client, m Msg) {
 		name, port := m.Name, c.publicPort
 		// DNS calls take a moment — never block this tunnel's data path on them.
 		go func() {
-			e, err := r.names.claim(c.id, name, port)
+			e, err := r.names.claimFrom(c.id, c.sourceIP, name, port)
 			if err != nil {
 				c.send(Msg{Type: "name_error", Message: err.Error()})
 				return
@@ -1155,6 +1260,45 @@ func (r *relay) acceptPlayers(c *client) {
 	}
 }
 
+// deliverToPlayer hands bytes the host sent for connection id to that player, counting them. It is the one place both the
+// JSON "data" frame and the binary frame end up, and it reports whether the connection exists.
+func (c *client) deliverToPlayer(id string, payload []byte) bool {
+	c.mu.Lock()
+	pc := c.players[id]
+	c.mu.Unlock()
+	if pc == nil {
+		return false
+	}
+	c.bytesOut.Add(int64(len(payload)))
+	pc.enqueue(payload)
+	return true
+}
+
+// admitPlayer registers a new player on the tunnel if the caps allow it: the tunnel-wide cap, and the per-source cap, where
+// a source is a limitKey (an IPv4 address, or an IPv6 /64 — one household, however many addresses it uses). Check and insert
+// are one critical section, so concurrent connections can't all see room and overrun the cap together.
+func (c *client) admitPlayer(id string, pc *playerConn, host string) bool {
+	key := limitKey(host)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.blocked[host] || len(c.players) >= maxPlayersPerTunnel || c.ipCounts[key] >= c.rel.playerLimit(key) {
+		return false
+	}
+	c.players[id] = pc
+	c.ipCounts[key]++
+	if len(c.players) > c.peakPlayers {
+		c.peakPlayers = len(c.players)
+	}
+	return true
+}
+
+// releasePlayerCount gives back the per-source slot a player held. Callers hold c.mu.
+func (c *client) releasePlayerCountLocked(host string) {
+	if key := limitKey(host); c.ipCounts[key] > 0 {
+		c.ipCounts[key]--
+	}
+}
+
 func (r *relay) handlePlayer(c *client, conn net.Conn) {
 	host, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 
@@ -1171,26 +1315,20 @@ func (r *relay) handlePlayer(c *client, conn net.Conn) {
 	// caps and then inserting in two separate locked sections would let many
 	// concurrent connections all observe room below the limit before any of
 	// them actually claims a slot, letting the real count run over the cap.
-	c.mu.Lock()
-	over := c.blocked[host] ||
-		len(c.players) >= maxPlayersPerTunnel ||
-		c.ipCounts[host] >= c.rel.maxPlayersPerIPTunnel
-	if over {
-		c.mu.Unlock()
+	if !c.admitPlayer(id, pc, host) {
 		pc.close()
 		return
 	}
-	c.players[id] = pc
-	c.ipCounts[host]++
-	if len(c.players) > c.peakPlayers {
-		c.peakPlayers = len(c.players)
-	}
-	c.mu.Unlock()
 	c.totalConns.Add(1)
 
 	c.send(Msg{Type: "connect", Conn: id, IP: host})
 
-	buf := make([]byte, 32*1024)
+	// The payload is read straight into buf after room for a binary frame's header, so a v2 tunnel needs no second copy.
+	raw, _ := rawID(id)
+	buf := make([]byte, frameHeaderLen+32*1024)
+	if c.bin {
+		putFrameHeader(buf, frameTCP, raw)
+	}
 	// A newly-connected player must send its first byte within
 	// initialPlayerInactivityTimeout (catches slot-squatting raw TCP
 	// connections that never speak Minecraft). After that, the read
@@ -1201,11 +1339,15 @@ func (r *relay) handlePlayer(c *client, conn net.Conn) {
 	deadline := c.rel.initialPlayerTimeout
 	for {
 		conn.SetReadDeadline(time.Now().Add(deadline))
-		n, err := conn.Read(buf)
+		n, err := conn.Read(buf[frameHeaderLen:])
 		if n > 0 {
 			deadline = c.rel.idlePlayerTimeout
 			c.bytesIn.Add(int64(n))
-			c.send(Msg{Type: "data", Conn: id, Data: base64.StdEncoding.EncodeToString(buf[:n])})
+			if c.bin {
+				c.sendFramed(buf[:frameHeaderLen+n])
+			} else {
+				c.send(Msg{Type: "data", Conn: id, Data: base64.StdEncoding.EncodeToString(buf[frameHeaderLen : frameHeaderLen+n])})
+			}
 		}
 		if err != nil {
 			break
@@ -1215,9 +1357,7 @@ func (r *relay) handlePlayer(c *client, conn net.Conn) {
 	c.send(Msg{Type: "close", Conn: id})
 	c.mu.Lock()
 	delete(c.players, id)
-	if c.ipCounts[host] > 0 {
-		c.ipCounts[host]--
-	}
+	c.releasePlayerCountLocked(host)
 	c.mu.Unlock()
 	pc.close()
 }
