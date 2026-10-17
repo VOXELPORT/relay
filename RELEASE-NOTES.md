@@ -4,6 +4,8 @@ A wider port pool, custom addresses that can no longer squat it, limits that wor
 a cheaper way to carry game data. **It is backward compatible**: every app and mod version that is already out keeps working
 against it, unchanged.
 
+This build also contains Direct mode (a host can have players connect straight to their router instead of through the relay) and join codes (a player connects peer-to-peer with a code; the relay only introduces them). Both are opt-in per host and described in the README. Direct mode adds one DNS record per host that turns it on, on top of that host's custom address.
+
 ## What changed
 
 ### More room: ports and custom addresses
