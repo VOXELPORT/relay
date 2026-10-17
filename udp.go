@@ -49,7 +49,7 @@ type udpState struct {
 	mu     sync.Mutex
 	byAddr map[string]*udpSession
 	byID   map[string]*udpSession
-	perIP  map[string]int
+	perIP  map[string]int // limitKey(player address) -> live sessions
 }
 
 func (u *udpState) close() {
@@ -65,8 +65,9 @@ func (u *udpState) remove(s *udpSession) {
 	}
 	delete(u.byID, s.id)
 	delete(u.byAddr, s.addr.String())
-	if u.perIP[s.host]--; u.perIP[s.host] <= 0 {
-		delete(u.perIP, s.host)
+	key := limitKey(s.host)
+	if u.perIP[key]--; u.perIP[key] <= 0 {
+		delete(u.perIP, key)
 	}
 }
 
@@ -118,7 +119,7 @@ func (c *client) udpReadLoop() {
 		s := u.byAddr[addr.String()]
 		isNew := false
 		if s == nil {
-			if len(u.byID) >= maxUDPSessionsPerTunnel || u.perIP[host] >= maxUDPSessionsPerIP {
+			if len(u.byID) >= maxUDPSessionsPerTunnel || u.perIP[limitKey(host)] >= maxUDPSessionsPerIP {
 				u.mu.Unlock()
 				continue
 			}
@@ -130,7 +131,7 @@ func (c *client) udpReadLoop() {
 			s = &udpSession{id: id, addr: addr, host: host}
 			u.byAddr[addr.String()] = s
 			u.byID[id] = s
-			u.perIP[host]++
+			u.perIP[limitKey(host)]++
 			isNew = true
 		}
 		s.lastSeen = time.Now()

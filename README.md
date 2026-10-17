@@ -85,8 +85,9 @@ GOOS=linux GOARCH=amd64 go build -o voxelport-relay .
 | `-reserved-ports` | 25565 | comma-separated ports inside the range that are never handed to a tunnel (ports other programs on the machine use). A `-listen` or `-direct-listen` port inside the range must be listed here, or the relay refuses to start |
 | `-tls-cert` / `-tls-key` | (unset) | serve `wss://` directly instead of behind a reverse proxy |
 | `-token-secret` | (unset) | shared-prefix gate — see "Token gate" above |
-| `-max-tunnels-per-ip` | 5 | max simultaneous active tunnels from one source IP |
-| `-max-players-per-ip` | 16 | max simultaneous player connections from one source IP, per tunnel |
+| `-max-tunnels-per-ip` / `-max-tunnels-per-ip6` | 25 / 5 | max simultaneous active tunnels from one IPv4 address / one IPv6 /64. IPv4 is higher because thousands of people can share one address (carrier-grade NAT on mobile networks); an IPv6 /64 is one household |
+| `-max-players-per-ip` / `-max-players-per-ip6` | 32 / 16 | max simultaneous player connections from one IPv4 address / one IPv6 /64, per tunnel |
+| `-reg-limit-ip` / `-reg-limit-ip6` | 30 / 10 | registration attempts per minute from one IPv4 address / one IPv6 /64 |
 | `-trusted-proxy-cidrs` | (unset) | CIDRs allowed to supply `X-Forwarded-For`/`X-Real-IP`; loopback is always trusted |
 | `-name-port-grace` | 168h | how long a custom address keeps its port reserved after its host was last seen. Supporters' and operator-granted addresses keep it for good. After the grace the port is free for anyone; when the host returns and the port is taken it gets another one and the DNS record follows, so the address does not change |
 | `-max-reserved-port-fraction` | 0.5 | largest share of the port range custom addresses may reserve (only names inside their grace, or kept for good, count). Past it, new claims fail with "Custom addresses are full right now"; supporters and operator grants are exempt |

@@ -39,8 +39,12 @@ func main() {
 	cert := flag.String("tls-cert", os.Getenv("RELAY_CERT"), "TLS certificate file (PEM) — enables wss://")
 	key := flag.String("tls-key", os.Getenv("RELAY_KEY"), "TLS key file (PEM)")
 	secret := flag.String("token-secret", os.Getenv("RELAY_TOKEN_SECRET"), "if set, only accept host tokens shaped vp_<secret>… (gates a public relay)")
-	maxTunnelsPerIP := flag.Int("max-tunnels-per-ip", 5, "maximum simultaneous active tunnels from one source IP")
-	maxPlayersPerIP := flag.Int("max-players-per-ip", 16, "maximum simultaneous player connections from one source IP, per tunnel")
+	maxTunnelsPerIP := flag.Int("max-tunnels-per-ip", defaultMaxTunnelsPerIP, "maximum simultaneous active tunnels from one IPv4 address (many people can share one: mobile networks)")
+	maxTunnelsPerIP6 := flag.Int("max-tunnels-per-ip6", defaultMaxTunnelsPerIP6, "maximum simultaneous active tunnels from one IPv6 /64")
+	maxPlayersPerIP := flag.Int("max-players-per-ip", defaultMaxPlayersPerIPTunnel, "maximum simultaneous player connections from one IPv4 address, per tunnel")
+	maxPlayersPerIP6 := flag.Int("max-players-per-ip6", defaultMaxPlayersPerIPTunnel6, "maximum simultaneous player connections from one IPv6 /64, per tunnel")
+	regLimitIP := flag.Int("reg-limit-ip", regLimitMax, "registration attempts per minute from one IPv4 address")
+	regLimitIP6 := flag.Int("reg-limit-ip6", regLimitMax6, "registration attempts per minute from one IPv6 /64")
 	trustedProxyCIDRs := flag.String("trusted-proxy-cidrs", "", "comma-separated CIDRs allowed to supply X-Forwarded-For (loopback is always trusted; production Caddy runs on the same host)")
 	directListen := flag.String("direct-listen", "", "optional second listener serving wss:// directly (e.g. :26499), bypassing any CDN/tunnel in front of -listen")
 	directCert := flag.String("direct-tls-cert", "", "TLS certificate (PEM) for -direct-listen; reloaded from disk when it changes")
@@ -53,6 +57,11 @@ func main() {
 
 	if err := validateConfig(*minPort, *maxPort, *maxTunnelsPerIP, *maxPlayersPerIP); err != nil {
 		log.Fatalf("invalid configuration: %v", err)
+	}
+	for name, v := range map[string]int{"-max-tunnels-per-ip6": *maxTunnelsPerIP6, "-max-players-per-ip6": *maxPlayersPerIP6, "-reg-limit-ip": *regLimitIP, "-reg-limit-ip6": *regLimitIP6} {
+		if v < 1 {
+			log.Fatalf("invalid configuration: %s must be at least 1", name)
+		}
 	}
 	reserved, err := parsePortList(*reservedPorts)
 	if err != nil {
@@ -92,11 +101,16 @@ func main() {
 		TokenSecret:           *secret,
 		MaxTunnelsPerIP:       *maxTunnelsPerIP,
 		MaxPlayersPerIPTunnel: *maxPlayersPerIP,
-		TrustedProxies:        trustedProxies,
-		Names:                 names,
-		PublicHost:            *publicHost,
-		Hidden:                hidden,
-		Supporters:            supporters,
+
+		MaxTunnelsPerIP6:       *maxTunnelsPerIP6,
+		MaxPlayersPerIPTunnel6: *maxPlayersPerIP6,
+		RegLimitIP:             *regLimitIP,
+		RegLimitIP6:            *regLimitIP6,
+		TrustedProxies:         trustedProxies,
+		Names:                  names,
+		PublicHost:             *publicHost,
+		Hidden:                 hidden,
+		Supporters:             supporters,
 
 		NamePortGrace:           *namePortGrace,
 		MaxReservedPortFraction: *maxReservedFraction,
@@ -160,8 +174,8 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("VoxelPort relay listening on %s, ports %d-%d (max %d tunnels/IP, %d players/IP/tunnel)",
-			*listen, *minPort, *maxPort, *maxTunnelsPerIP, *maxPlayersPerIP)
+		log.Printf("VoxelPort relay listening on %s, ports %d-%d (per IPv4: %d tunnels, %d players/tunnel, %d registrations/min; per IPv6 /64: %d, %d, %d)",
+			*listen, *minPort, *maxPort, *maxTunnelsPerIP, *maxPlayersPerIP, *regLimitIP, *maxTunnelsPerIP6, *maxPlayersPerIP6, *regLimitIP6)
 		if *cert != "" {
 			serveErr <- srv.ListenAndServeTLS(*cert, *key)
 		} else {
