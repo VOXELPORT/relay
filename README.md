@@ -91,6 +91,7 @@ GOOS=linux GOARCH=amd64 go build -o voxelport-relay .
 | `-trusted-proxy-cidrs` | (unset) | CIDRs allowed to supply `X-Forwarded-For`/`X-Real-IP`; loopback is always trusted |
 | `-name-port-grace` | 168h | how long a custom address keeps its port reserved after its host was last seen. Supporters' and operator-granted addresses keep it for good. After the grace the port is free for anyone; when the host returns and the port is taken it gets another one and the DNS record follows, so the address does not change |
 | `-max-reserved-port-fraction` | 0.5 | largest share of the port range custom addresses may reserve (only names inside their grace, or kept for good, count). Past it, new claims fail with "Custom addresses are full right now"; supporters and operator grants are exempt |
+| `-names-supporters-only` | off | new custom addresses only for supporters (`supporters.txt`) and the operator's own grants. Every address is DNS records and a Cloudflare zone holds a fixed number, so this stops the zone from filling while the perk is paid. Existing addresses keep working, re-claiming one and releasing one still work; an ordinary host asking for a new one is told so in English and Hinglish |
 | `-name-claims-per-ip-day` | 10 | new custom addresses one IPv4 address may claim per 24 hours |
 | `-name-claims-per-ip6-day` | 3 | new custom addresses one IPv6 /64 may claim per 24 hours |
 

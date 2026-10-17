@@ -21,6 +21,10 @@ against it, unchanged.
 - **New claims are limited per source**: `-name-claims-per-ip-day` (default 10 per IPv4 address) and
   `-name-claims-per-ip6-day` (default 3 per IPv6 /64), per 24 hours. The existing per-host attempt limit stays.
 
+- **`-names-supporters-only`** (off by default) makes new custom addresses a supporter perk: only hosts in `supporters.txt` and the
+  operator's own grants get a new one; everyone else is told so. Addresses that already exist keep working, and releasing one is
+  still allowed. Use it when the DNS zone is near its record limit (each address is two records).
+
 ### Limits that work behind carrier-grade NAT
 
 Per-source limits now count per *key* (an IPv4 address, or the /64 of an IPv6 address; IPv4-mapped IPv6 counts as IPv4), with

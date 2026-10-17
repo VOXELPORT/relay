@@ -48,6 +48,10 @@ const (
 	nameCloseSaveEvery = 5 * time.Minute
 )
 
+// errNamesSupportersOnly is what a host is told while new custom addresses are a supporter perk (-names-supporters-only). It
+// says both things a host needs to know: why nothing new, and that the address they already have keeps working.
+var errNamesSupportersOnly = errors.New("New custom addresses are for VoxelPort supporters now. Your current address (if you have one) keeps working. / Naye custom address ab sirf VoxelPort supporters ke liye hain; jo address pehle se hai woh chalta rahega.")
+
 var namePattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{1,18}[a-z0-9])$`)
 
 // reservedNames can never be claimed: existing infrastructure, things that
@@ -158,6 +162,7 @@ type nameStore struct {
 	keep                func(clientID, name string) bool
 	claimsPerIPDay      int
 	claimsPerIPDay6     int
+	supportersOnly      bool                   // set by -names-supporters-only: ordinary hosts get no new address; existing ones, re-claims and releases still work
 	ipClaims            map[string][]time.Time // limitKey -> times of successful new claims in the last day
 	lastSaved           time.Time
 
@@ -214,6 +219,7 @@ type nameLimits struct {
 	Keep                func(clientID, name string) bool // supporters: port kept for good, and exempt from the cap
 	ClaimsPerIPDay      int                              // new claims per IPv4 address per day
 	ClaimsPerIPDay6     int                              // new claims per IPv6 /64 per day
+	SupportersOnly      bool                             // new custom addresses only for supporters and operator grants
 }
 
 func (s *nameStore) configure(l nameLimits) {
@@ -221,6 +227,7 @@ func (s *nameStore) configure(l nameLimits) {
 	defer s.mu.Unlock()
 	s.grace, s.maxReservedFraction, s.poolSize, s.keep = l.Grace, l.MaxReservedFraction, l.PoolSize, l.Keep
 	s.claimsPerIPDay, s.claimsPerIPDay6 = l.ClaimsPerIPDay, l.ClaimsPerIPDay6
+	s.supportersOnly = l.SupportersOnly
 }
 
 // The effective rules, with defaults for anything left at zero. Callers hold s.mu.
@@ -472,7 +479,18 @@ func (s *nameStore) claimName(clientID, ip, name string, port int, short bool) (
 		return out, nil
 	}
 
-	// A brand-new name from here on. The operator's grants and supporters are exempt from the capacity rules; everyone
+	// A brand-new name from here on. When custom addresses are a supporter perk (every address is DNS records, and the zone
+	// has a fixed number of them), only supporters and the operator's own grants get a new one. Names that already exist,
+	// re-claiming one, and releasing one are not affected.
+	s.mu.Lock()
+	supportersOnly := s.supportersOnly
+	isSupporter := s.keep != nil && s.keep(clientID, name)
+	s.mu.Unlock()
+	if supportersOnly && !short && !isSupporter {
+		return nameEntry{}, errNamesSupportersOnly
+	}
+
+	// The operator's grants and supporters are exempt from the capacity rules; everyone
 	// else is held to the share of the port range names may reserve, and to a daily limit per source address, so a few
 	// scripts can't squat the pool.
 	now := time.Now()

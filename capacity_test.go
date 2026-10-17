@@ -510,3 +510,97 @@ func TestP4_TheOperatorAndTheHostsOwnAttemptLimitAreUnchanged(t *testing.T) {
 		}
 	}
 }
+
+// ─── N: custom addresses as a supporter perk (-names-supporters-only) ────────
+
+func supportersOnlyFixture(t *testing.T, supporters string) (*nameStore, relayConfig, func() (*websocket.Conn, int), func()) {
+	t.Helper()
+	dns := newFakeDNS()
+	cfg, dir := featureConfig(t, dns, 27500, 27519)
+	cfg.NamesSupportersOnly = true
+	if supporters != "" {
+		path := filepath.Join(dir, "supporters.txt")
+		if err := os.WriteFile(path, []byte(supporters+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg.Supporters = newHiddenList(path)
+	}
+	srv, _ := newFeatureServer(cfg)
+	connect := func() (*websocket.Conn, int) { return register(t, srv, tokA, false) }
+	return cfg.Names, cfg, connect, srv.Close
+}
+
+func TestN1_AnOrdinaryHostGetsNoNewAddressWhenItIsASupporterPerk(t *testing.T) {
+	_, _, connect, closeAll := supportersOnlyFixture(t, "")
+	defer closeAll()
+	ws, _ := connect()
+	defer ws.Close()
+	m := claimOverWS(t, ws, "freeloader")
+	if m.Type != "name_error" || !strings.Contains(m.Message, "New custom addresses are for VoxelPort supporters now") || !strings.Contains(m.Message, "keeps working") {
+		t.Fatalf("an ordinary host must be told, in plain words, got %+v", m)
+	}
+	if !strings.Contains(m.Message, "Naye custom address") {
+		t.Fatalf("and in Hinglish too: %q", m.Message)
+	}
+}
+
+func TestN1_ASupporterAndAnOperatorGrantStillGetAnAddress(t *testing.T) {
+	store, _, connect, closeAll := supportersOnlyFixture(t, clientIDFor(tokA)[:12])
+	defer closeAll()
+	ws, port := connect()
+	defer ws.Close()
+	if m := claimOverWS(t, ws, "supporter-smp"); m.Type != "name" {
+		t.Fatalf("a supporter (listed by client id) gets one: %+v", m)
+	}
+	if _, err := store.grantShort(clientIDFor(tokB), "zz", port+1); err != nil {
+		t.Fatalf("the operator can still grant one: %v", err)
+	}
+}
+
+func TestN1_AnAddressAHostAlreadyHasKeepsWorking(t *testing.T) {
+	dns := newFakeDNS()
+	cfg, _ := featureConfig(t, dns, 27530, 27539)
+	srv, r := newFeatureServer(cfg)
+	defer srv.Close()
+	ws, port := register(t, srv, tokA, false)
+	if m := claimOverWS(t, ws, "oldfriend"); m.Type != "name" {
+		t.Fatalf("claim before the change: %+v", m)
+	}
+	disconnect(t, ws, r, tokA)
+
+	// The perk becomes supporters-only.
+	cfg.Names.configure(nameLimits{SupportersOnly: true, PoolSize: 10})
+
+	ws2, _ := register(t, srv, tokA, false) // reconnecting: the name is announced as before
+	defer ws2.Close()
+	if m := readUntil(t, ws2, "name"); m.Name != "oldfriend" {
+		t.Fatalf("an existing address is still announced: %+v", m)
+	}
+	if m := claimOverWS(t, ws2, "oldfriend"); m.Type != "name" {
+		t.Fatalf("apps re-send their address on every start; that must keep working: %+v", m)
+	}
+	if m := claimOverWS(t, ws2, "somethingnew"); m.Type != "name_error" {
+		t.Fatalf("but swapping it for a new one is a new address: %+v", m)
+	}
+	// Releasing is always allowed, and frees the DNS records.
+	writeMsg(t, ws2, Msg{Type: "release_name"})
+	if m := readUntil(t, ws2, "name"); m.Name != "" {
+		t.Fatalf("release: %+v", m)
+	}
+	_ = port
+	if _, ok := cfg.Names.forClient(clientIDFor(tokA)); ok {
+		t.Fatal("the address is gone after a release")
+	}
+}
+
+func TestN1_TheDefaultIsUnchanged(t *testing.T) {
+	dns := newFakeDNS()
+	cfg, _ := featureConfig(t, dns, 27540, 27549)
+	srv, _ := newFeatureServer(cfg)
+	defer srv.Close()
+	ws, _ := register(t, srv, tokA, false)
+	defer ws.Close()
+	if m := claimOverWS(t, ws, "everyone"); m.Type != "name" {
+		t.Fatalf("without the flag anyone can claim: %+v", m)
+	}
+}

@@ -556,6 +556,7 @@ type relayConfig struct {
 	MaxReservedPortFraction float64       // share of the port range names may reserve
 	NameClaimsPerIPDay      int           // new claims per IPv4 address per day
 	NameClaimsPerIPDay6     int           // new claims per IPv6 /64 per day
+	NamesSupportersOnly     bool          // new custom addresses only for supporters and operator grants
 	// ReservedPorts are inside the range but never handed to a tunnel: ports other programs on the machine use.
 	ReservedPorts []int
 
@@ -616,6 +617,7 @@ func newRelay(cfg relayConfig) *relay {
 			Keep:                r.supporters.has,
 			ClaimsPerIPDay:      cfg.NameClaimsPerIPDay,
 			ClaimsPerIPDay6:     cfg.NameClaimsPerIPDay6,
+			SupportersOnly:      cfg.NamesSupportersOnly,
 		})
 	}
 	go r.sweepLoop()
