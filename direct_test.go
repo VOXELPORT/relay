@@ -109,14 +109,14 @@ func TestProbeAcceptsAMinecraftServerAndSendsAStatusRequest(t *testing.T) {
 
 func TestProbeRefusesAnythingThatIsNotAMinecraftServer(t *testing.T) {
 	cases := map[string][]byte{
-		"an HTTP server":                   []byte("HTTP/1.1 400 Bad Request\r\n\r\n"),
-		"silence":                          nil,
-		"garbage":                          {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
-		"a status with no version":         statusPacket(`{"hello":"world"}`),
-		"a status that is not JSON":        statusPacket(`not json at all`),
-		"the wrong packet":                 packetWith(1, []byte{0, 0, 0, 0, 0, 0, 0, 0}),
-		"a length bigger than allowed":     putVarInt(nil, maxStatusBytes+1),
-		"a length with nothing after it":   putVarInt(nil, 50),
+		"an HTTP server":                  []byte("HTTP/1.1 400 Bad Request\r\n\r\n"),
+		"silence":                         nil,
+		"garbage":                         {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+		"a status with no version":        statusPacket(`{"hello":"world"}`),
+		"a status that is not JSON":       statusPacket(`not json at all`),
+		"the wrong packet":                packetWith(1, []byte{0, 0, 0, 0, 0, 0, 0, 0}),
+		"a length bigger than allowed":    putVarInt(nil, maxStatusBytes+1),
+		"a length with nothing after it":  putVarInt(nil, 50),
 		"a string longer than the packet": packetWith(0, append(putVarInt(nil, 9999), 'x')),
 	}
 	for name, reply := range cases {
@@ -143,6 +143,9 @@ type directRig struct {
 	r   *relay
 	dir string
 	ok  atomic.Bool // whether the pretend server answers the relay's checks
+	// blip is how many of the next checks fail before the pretend server answers again (set it, never replace the relay's
+	// check function while the relay's background checks are running: that would be a data race).
+	blip atomic.Int32
 }
 
 // newDirectRig is a relay with a fake DNS whose public-address check and outside probe are replaced,
@@ -158,6 +161,10 @@ func newDirectRig(t *testing.T) (*directRig, func(token string) *wsHost) {
 	rig.ok.Store(true)
 	r.directAllowIP = func(string) bool { return true }
 	r.directProbeFn = func(context.Context, string, int) error {
+		if rig.blip.Load() > 0 {
+			rig.blip.Add(-1)
+			return errors.New("a blip")
+		}
 		if rig.ok.Load() {
 			return nil
 		}
@@ -393,13 +400,7 @@ func TestOneMissedCheckDoesNotSendPlayersBack(t *testing.T) {
 	ws := h.ws
 	writeMsg(t, ws, Msg{Type: "direct", Port: 25565})
 	readUntil(t, ws, "direct")
-	var calls atomic.Int32
-	rig.r.directProbeFn = func(context.Context, string, int) error {
-		if calls.Add(1) == 1 {
-			return errors.New("a blip")
-		}
-		return nil
-	}
+	rig.blip.Store(1) // the next check fails once, then the server answers again
 	time.Sleep(300 * time.Millisecond)
 	if !rig.r.hostWantsDirect(h.id) {
 		t.Fatal("a single missed check should not end Direct mode")

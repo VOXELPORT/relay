@@ -408,7 +408,9 @@ func TestB4_ByteCountersAreTheSameInBothModes(t *testing.T) {
 			writeMsg(t, ws, Msg{Type: "data", Conn: id, Data: base64.StdEncoding.EncodeToString(down)})
 		}
 		readPlayer(t, p, len(down))
+		r.mu.Lock() // the relay's own goroutines change this map
 		c := r.clients[clientIDFor(token)]
+		r.mu.Unlock()
 		return c.bytesIn.Load(), c.bytesOut.Load()
 	}
 	inJSON, outJSON := counts(false, "vp_b4count_jsonjsonjson")
