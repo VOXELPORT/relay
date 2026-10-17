@@ -116,16 +116,26 @@ of these require an app update — see "Compatibility" below.
 | Limit | Value | Purpose |
 |---|---|---|
 | Control-channel message size | 4 MB | bounds memory a single WebSocket frame can force the relay to allocate |
-| Registration attempts | 10 per source IP per minute | blunts scripted registration of many fake tunnels |
-| Active tunnels per source IP | 5 (`-max-tunnels-per-ip`) | stops one IP from consuming the whole port pool |
+| Registration attempts | 30 per IPv4 address / 10 per IPv6 /64, per minute (`-reg-limit-ip`, `-reg-limit-ip6`) | blunts scripted registration of many fake tunnels |
+| Active tunnels per source | 25 per IPv4 address / 5 per IPv6 /64 (`-max-tunnels-per-ip`, `-max-tunnels-per-ip6`) | stops one source from consuming the whole port pool |
 | Control-channel idle timeout | 90s (re-armed per message) | reclaims a tunnel whose host vanished without a clean TCP close |
 | Players per tunnel | 256 concurrent | stops one attacker from flooding a single host with connections |
-| Players per source IP, per tunnel | 16 (`-max-players-per-ip`) | stops one IP from occupying most of a tunnel's player slots |
+| Players per source, per tunnel | 32 per IPv4 address / 16 per IPv6 /64 (`-max-players-per-ip`, `-max-players-per-ip6`) | stops one source from occupying most of a tunnel's player slots |
+| New custom addresses per source | 10 per IPv4 address / 3 per IPv6 /64, per 24 hours | stops a script from claiming addresses to squat ports |
+| Share of the port range names may reserve | 50% (`-max-reserved-port-fraction`) | offline custom addresses can never starve the hosts that are online |
+| How long an absent host keeps its address's port | 7 days (`-name-port-grace`) | after that the port goes back to the pool (supporters and granted addresses keep theirs) |
 | Player initial-inactivity timeout | 30s | drops a raw TCP connection that never sends anything (slot squatting) |
 | Player idle timeout | 10 min (re-armed per read) | reaps a connection that's gone silent at the TCP level after being active |
 | Player write queue | 128 messages, then disconnect | a slow/stuck player can't block the host's control channel or other players (see "Slow players" in SECURITY.md) |
 | Sticky-port memory | 1 hour after disconnect | bounds memory used remembering "give this token its old port back" |
 | Connection ID | 128 bits (`crypto/rand`) | not guessable/spoofable |
+
+**What "source" means.** Limits are counted per *key*, not per raw address: an IPv4 address is its own key; an
+IPv6 address is reduced to its /64 (one home or phone is handed a whole /64, so counting full addresses would let it
+look like thousands of people); an IPv4-mapped IPv6 address (`::ffff:1.2.3.4`) is the IPv4 address. IPv4 limits are
+generous because most Indian mobile networks put thousands of subscribers behind one IPv4 address (carrier-grade NAT):
+a low per-address limit would lock real people out. Refusals say so in plain words ("Too many VoxelPort servers are
+online from your network right now (limit 25). If you're on mobile data, try Wi-Fi.").
 
 `X-Forwarded-For` and `X-Real-IP` are only trusted from loopback (the
 documented Caddy/nginx-on-the-same-host deployments — different reverse
@@ -167,6 +177,34 @@ Limits: 256 sessions per tunnel, 8 per source IP, 2048-byte datagrams, 60 s
 idle timeout. Until a session has sent 4 datagrams, the host may send it at
 most 4× the bytes it received plus 600 — so a spoofed source address can't
 turn the relay into an amplifier, while a real RakNet ping/pong still fits.
+
+### Protocol v2: binary data frames (opt-in)
+
+In v1 every payload byte travels as base64 inside a JSON text frame, about a third more bandwidth, and a lot more CPU,
+than the bytes themselves. A host can ask for v2:
+
+1. The host's `register` frame adds `"bin":1`.
+2. A relay that supports it answers with `{"type":"port","port":N,"bin":1}`. A relay that doesn't (or a host that
+   didn't ask) never sets `bin`, and everything stays v1.
+3. From then on, TCP and UDP payloads travel in **both directions** as *binary* WebSocket messages:
+
+```
+byte 0        kind    0x01 = TCP data, 0x02 = UDP datagram
+bytes 1..16   the connection (or UDP session) id: the 16 raw bytes of the 32-character hex id the relay sends in
+              `connect` (or the first UDP frame)
+bytes 17..    the payload
+```
+
+Everything else stays a JSON text frame in both modes: `connect`, `close`, `ping`, `pong`, `udp_close`, names, listing,
+errors and notices. In v2 a UDP session has no JSON first frame, so its source address (`ip`) is not sent (nothing but the
+log ever used it). A host in v2 may still send JSON `data` / `udp` frames; the relay accepts them. A binary frame on a
+tunnel that did not ask for v2 is ignored.
+
+The relay drops, and logs (at most once per 30 s per tunnel), binary frames that are shorter than 17 bytes, have an unknown
+kind, name an unknown connection, or carry a UDP datagram over 2048 bytes. Byte counters (`in=`/`out=` in the usage log, the
+status totals) count payload bytes only, identically in both modes.
+
+On a 64 KB payload, encode + decode takes about 15 µs in v2 against about 500 µs in v1 (`go test -bench DataPath`).
 
 ### Custom addresses
 
@@ -269,7 +307,8 @@ app versions (and the discontinued mod) work unchanged against this relay**, wit
 required. The only externally-observable differences: connection IDs are
 now 32 hex characters instead of 16 (clients only ever echo these back as
 opaque strings, so length was never assumed), and abusive/stuck
-connections get disconnected sooner than before.
+connections get disconnected sooner than before. Protocol v2 (binary data frames) is opt-in per host: a host that
+doesn't send `"bin":1` is served exactly as before.
 
 ## Security notes
 
