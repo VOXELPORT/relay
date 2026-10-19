@@ -37,7 +37,14 @@ var webFS embed.FS
 func main() {
 	listen := flag.String("listen", "100.89.127.14:2530", "private address to serve the dashboard on (the Tailscale IP)")
 	relayAPI := flag.String("relay", "http://127.0.0.1:2528", "relay operator API")
-	relayNA := flag.String("relay-na", "", "North America relay operator API (e.g. http://127.0.0.1:2531, an SSH tunnel to its loopback API); empty if there is none")
+	relayNA := flag.String("relay-na", "", "second region's relay operator API (e.g. http://127.0.0.1:2531, an SSH tunnel to its loopback API); empty if there is none. Same as -relay2")
+	relay2 := flag.String("relay2", "", "second region's relay operator API; see -relay-na")
+	r2ID := flag.String("region2-id", "na", "what the second region's actions and events are tagged with (eu for Europe)")
+	r2Label := flag.String("region2-label", "North America", "the second region's name on the dashboard")
+	r2Short := flag.String("region2-short", "NA", "the short tag on a server row")
+	r2Provider := flag.String("region2-provider", "AWS us-east-1", "where the second region's machine runs, shown on its card")
+	r2FreeGB := flag.Float64("region2-egress-free-gb", 100, "free data out per month on the second machine, in GB; 0 hides the allowance meter")
+	r2Since := flag.String("region2-since", "", "date (YYYY-MM-DD) the second region started in its current form; chart points before it are not shown for it")
 	webAPI := flag.String("web", "http://127.0.0.1:2529", "website stats API")
 	iface := flag.String("iface", "", "network interface to chart (default: the busiest physical one)")
 	repo := flag.String("github-repo", "VOXELPORT/VoxelPort-App", "GitHub repo whose release downloads are counted")
@@ -66,7 +73,20 @@ func main() {
 	if err != nil {
 		log.Fatalf("data dir: %v", err)
 	}
-	up := &upstreams{relay: *relayAPI, relayNA: *relayNA, web: *webAPI, token: token, client: &http.Client{Timeout: 4 * time.Second}}
+	if *relay2 != "" {
+		*relayNA = *relay2
+	}
+	var since int64
+	if *r2Since != "" {
+		d, err := time.ParseInLocation("2006-01-02", *r2Since, loc)
+		if err != nil {
+			log.Fatalf("-region2-since: %v", err)
+		}
+		since = d.UnixMilli()
+	}
+	up := &upstreams{relay: *relayAPI, relayNA: *relayNA, web: *webAPI, token: token, token2: os.Getenv("VOXELPORT_ADMIN_TOKEN2"),
+		r2:     region2{ID: *r2ID, Label: *r2Label, Short: *r2Short, Provider: *r2Provider, EgressFree: *r2FreeGB * 1024 * 1024 * 1024, SinceMillis: since},
+		client: &http.Client{Timeout: 4 * time.Second}}
 	sys := newSampler(*iface, up, st)
 	go sys.run()
 	dl := newDownloads(st, *repo, *storeApp, os.Getenv("STORE_TENANT_ID"), os.Getenv("STORE_CLIENT_ID"), os.Getenv("STORE_CLIENT_SECRET"))

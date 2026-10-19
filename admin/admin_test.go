@@ -86,7 +86,7 @@ func TestActionRouting(t *testing.T) {
 	in, na := relay("in"), relay("na")
 	defer in.Close()
 	defer na.Close()
-	u := &upstreams{relay: in.URL, relayNA: na.URL, token: "x", client: http.DefaultClient}
+	u := &upstreams{relay: in.URL, relayNA: na.URL, token: "x", r2: region2{ID: "na", Label: "North America"}, client: http.DefaultClient}
 
 	for body, want := range map[string][2]int{
 		`{"action":"ban","id":"abcdef12"}`:                    {1, 1},
@@ -113,5 +113,73 @@ func TestActionRouting(t *testing.T) {
 	u.relayNA = ""
 	if code, _ := u.action([]byte(`{"action":"kick","id":"abcdef12","region":"na"}`)); code != http.StatusBadRequest {
 		t.Errorf("NA kick without an NA relay: status %d", code)
+	}
+}
+
+// The second region can be Europe: actions tagged "eu" go to it, each relay gets its own token,
+// and "na" (the old region) is refused instead of hitting India.
+func TestSecondRegionEuropeAndTokens(t *testing.T) {
+	var gotIn, gotEU []string
+	mk := func(sink *[]string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			*sink = append(*sink, r.Header.Get("Authorization"))
+			w.Write([]byte(`{"ok":true}`))
+		}))
+	}
+	in, eu := mk(&gotIn), mk(&gotEU)
+	defer in.Close()
+	defer eu.Close()
+	u := &upstreams{relay: in.URL, relayNA: eu.URL, token: "india-token", token2: "europe-token",
+		r2: region2{ID: "eu", Label: "Europe", Short: "EU"}, client: http.DefaultClient}
+
+	if got := u.relayFor("eu"); got != eu.URL {
+		t.Fatalf("eu goes to %s, want the Europe relay", got)
+	}
+	if got := u.relayFor("in"); got != in.URL {
+		t.Fatalf("in goes to %s", got)
+	}
+	if code, _ := u.action([]byte(`{"action":"kick","id":"abcdef12","region":"na"}`)); code != http.StatusOK {
+		// "na" is not the second region any more, so it falls back to India like any unknown region did.
+		t.Fatalf("unknown region: status %d", code)
+	}
+	gotIn, gotEU = nil, nil
+	if code, _ := u.action([]byte(`{"action":"kick","id":"abcdef12","region":"eu"}`)); code != http.StatusOK {
+		t.Fatalf("eu kick: status %d", code)
+	}
+	if len(gotEU) != 1 || gotEU[0] != "Bearer europe-token" || len(gotIn) != 0 {
+		t.Errorf("eu kick: Europe saw %v, India saw %v", gotEU, gotIn)
+	}
+	gotIn, gotEU = nil, nil
+	if code, _ := u.action([]byte(`{"action":"ban","id":"abcdef12"}`)); code != http.StatusOK {
+		t.Fatalf("ban: status %d", code)
+	}
+	if len(gotIn) != 1 || gotIn[0] != "Bearer india-token" || len(gotEU) != 1 || gotEU[0] != "Bearer europe-token" {
+		t.Errorf("ban: India %v, Europe %v: each relay needs its own token", gotIn, gotEU)
+	}
+	// Without a separate token the shared one is used.
+	u.token2 = ""
+	if got := u.tokenFor(eu.URL); got != "india-token" {
+		t.Errorf("shared token fallback: %q", got)
+	}
+}
+
+// Points from before the second region started in its current form must not show as that region.
+func TestClipRegion2(t *testing.T) {
+	pts := []sample{
+		{T: 1000, Players: 3, NAPlayers: 9, NAIn: 5},
+		{T: 3000, Players: 4, NAPlayers: 2, NAIn: 7},
+	}
+	if got := clipRegion2(pts, 0); &got[0] != &pts[0] {
+		t.Error("since=0 must leave the points alone")
+	}
+	got := clipRegion2(pts, 2000)
+	if got[0].NAPlayers != 0 || got[0].NAIn != 0 || got[0].Players != 3 {
+		t.Errorf("old point not clipped, or India data lost: %+v", got[0])
+	}
+	if got[1].NAPlayers != 2 || got[1].NAIn != 7 {
+		t.Errorf("new point wrongly clipped: %+v", got[1])
+	}
+	if pts[0].NAPlayers != 9 {
+		t.Error("the input slice must not be modified")
 	}
 }

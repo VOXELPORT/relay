@@ -22,24 +22,47 @@ const (
 	longLen     = 1440 // 24 hours of 1-minute averages
 )
 
+// region2 describes the optional second relay region (it was North America,
+// now typically Europe). Its fields only change how it is named and charted;
+// the samples keep their historic n* JSON names.
+type region2 struct {
+	ID          string  `json:"id"`          // "eu": what actions and events are tagged with
+	Label       string  `json:"label"`       // "Europe"
+	Short       string  `json:"short"`       // "EU": the tag on a server row
+	Provider    string  `json:"provider"`    // "Hetzner · Helsinki": shown on the machine card
+	EgressFree  float64 `json:"egress_free"` // bytes of free data out per month; 0 = no meter
+	SinceMillis int64   `json:"since"`       // chart points before this (unix ms) are not this region's
+}
+
 // upstreams talks to the relays' operator APIs and the website's stats API.
-// relayNA is the North America relay's operator API, reached through an SSH
-// tunnel over Tailscale ("" when there is no second region).
+// relayNA is the second region's relay operator API, reached through an SSH
+// tunnel over Tailscale ("" when there is no second region); the field keeps
+// its old name. token2 is that relay's own token (token when empty).
 type upstreams struct {
 	relay, relayNA, web, token string
+	token2                     string
+	r2                         region2
 	client                     *http.Client
 }
 
 func (u *upstreams) relayFor(region string) string {
-	if region == "na" {
+	if u.r2.ID != "" && region == u.r2.ID {
 		return u.relayNA
 	}
 	return u.relay
 }
 
+// tokenFor is the operator token the relay at base expects.
+func (u *upstreams) tokenFor(base string) string {
+	if u.token2 != "" && base == u.relayNA {
+		return u.token2
+	}
+	return u.token
+}
+
 func (u *upstreams) get(base, path string) (map[string]any, error) {
 	req, _ := http.NewRequest("GET", base+path, nil)
-	req.Header.Set("Authorization", "Bearer "+u.token)
+	req.Header.Set("Authorization", "Bearer "+u.tokenFor(base))
 	resp, err := u.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -67,7 +90,7 @@ func (u *upstreams) action(body []byte) (int, map[string]any) {
 		if u.relayNA != "" {
 			if c2, out2 := u.actionOn(u.relayNA, body); c2 != http.StatusOK && code == http.StatusOK {
 				msg, _ := out2["error"].(string)
-				return c2, map[string]any{"error": "done in India, but the North America relay said: " + msg}
+				return c2, map[string]any{"error": "done in India, but the " + u.r2.Label + " relay said: " + msg}
 			}
 		}
 		return code, out
@@ -81,7 +104,7 @@ func (u *upstreams) action(body []byte) (int, map[string]any) {
 
 func (u *upstreams) actionOn(base string, body []byte) (int, map[string]any) {
 	req, _ := http.NewRequest("POST", base+"/action", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+u.token)
+	req.Header.Set("Authorization", "Bearer "+u.tokenFor(base))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
 	if err != nil {
@@ -174,7 +197,7 @@ func newSampler(iface string, up *upstreams, st *store) *sampler {
 	if iface == "" {
 		iface = busiestIface()
 	}
-	s := &sampler{iface: iface, up: up, st: st, tr: newTracker(st, ""), trNA: newTracker(st, "na")}
+	s := &sampler{iface: iface, up: up, st: st, tr: newTracker(st, ""), trNA: newTracker(st, up.r2.ID)}
 	// Pick up where we left off: the charts survive a restart.
 	now := time.Now()
 	s.short = st.raw5s(now.Add(-time.Hour), now)
@@ -368,6 +391,29 @@ func (s *sampler) egressThisMonth(now time.Time) (float64, string) {
 	return s.egress.bytes + recent + pending, utc.Format("January")
 }
 
+// clipRegion2 blanks the second region's numbers on points before since (unix
+// ms). That slot was North America once; its old points must not show up as
+// the region it is now. A copy is returned when anything is blanked.
+func clipRegion2(pts []sample, since int64) []sample {
+	if since <= 0 {
+		return pts
+	}
+	out := pts
+	copied := false
+	for i := range pts {
+		p := pts[i]
+		if p.T >= since || (p.NAIn == 0 && p.NAOut == 0 && p.NAPlayers == 0 && p.NATunnels == 0 && p.NACPU == 0 && p.NANetRx == 0 && p.NANetTx == 0) {
+			continue
+		}
+		if !copied {
+			out = append([]sample(nil), pts...)
+			copied = true
+		}
+		out[i].NAIn, out[i].NAOut, out[i].NAPlayers, out[i].NATunnels, out[i].NACPU, out[i].NANetRx, out[i].NANetTx = 0, 0, 0, 0, 0, 0, 0
+	}
+	return out
+}
+
 func errText(err error) string {
 	if err == nil {
 		return ""
@@ -448,6 +494,7 @@ func (s *sampler) history(rng string) map[string]any {
 	if pts == nil {
 		pts = []sample{}
 	}
+	pts = clipRegion2(pts, s.up.r2.SinceMillis)
 	return map[string]any{"range": rng, "points": pts}
 }
 
@@ -465,6 +512,7 @@ func overview(up *upstreams, s *sampler, dl *downloads) map[string]any {
 	if up.relayNA != "" {
 		out["relay_na"], out["relay_na_err"] = s.relayNA, s.relayNAErr
 		out["na_system"], out["na_system_err"] = s.naSys, s.naSysErr
+		out["region2"] = up.r2
 	}
 	s.mu.Unlock()
 	out["downloads"] = dl.snapshot()

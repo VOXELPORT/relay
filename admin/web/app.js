@@ -11,7 +11,7 @@ const S1 = css('--series-1');
 const S2 = css('--series-2');
 const BRAND = css('--brand');
 
-const FREE_EGRESS = 100 * 1024 ** 3; // AWS free data out per month
+// The second region's free data-out allowance (if its machine has one) comes from the overview: region2.egress_free.
 
 let range = '1h';
 let lastOK = 0;
@@ -79,12 +79,18 @@ const grantBtn = (id, region) => `<button type="button" class="btn sm" data-gran
 // The relays the dashboard watches: India (this machine) and, when
 // configured, North America. Each server, address and session belongs to one.
 const naOn = () => Boolean(ov && 'relay_na' in ov);
+// The second region (North America once, Europe now) is named by the dashboard's flags and sent in the overview.
+const r2 = () => (ov && ov.region2) || { id: 'na', label: 'North America', short: 'NA', provider: 'AWS us-east-1', egress_free: 100 * 1024 ** 3 };
+// Saved events and sessions keep the region they were tagged with, which may no longer be the second region.
+const REGION_SHORT = { in: 'IN', na: 'NA', eu: 'EU' };
+const regionShort = (id) => (id === r2().id ? r2().short : REGION_SHORT[id] || String(id).toUpperCase());
+const tagFor = (id) => `<span class="tag region-${esc(id)}">${esc(regionShort(id))}</span>`;
 function relays() {
   const out = [{ id: 'in', label: 'India', r: ov.relay, err: ov.relay_err }];
-  if (naOn()) out.push({ id: 'na', label: 'North America', r: ov.relay_na, err: ov.relay_na_err });
+  if (naOn()) out.push({ id: r2().id, label: r2().label, r: ov.relay_na, err: ov.relay_na_err });
   return out;
 }
-const regionTag = (id) => (naOn() ? `<span class="tag region-${id}">${id === 'na' ? 'NA' : 'IN'}</span>` : '');
+const regionTag = (id) => (naOn() ? tagFor(id || 'in') : '');
 
 async function act(action, id, region = 'in') {
   const key = `${action}:${id}:${region}`;
@@ -249,7 +255,7 @@ function renderServices(services) {
   }).join('');
   if (naOn()) {
     const up = Boolean(ov.relay_na);
-    html += `<span class="pill" title="North America relay operator API${up ? '' : ': ' + esc(ov.relay_na_err)}"><span class="dot ${up ? 'good' : 'bad'}"></span>NA relay${up ? '' : ' · unreachable'}</span>`;
+    html += `<span class="pill" title="${esc(r2().label)} relay operator API${up ? '' : ': ' + esc(ov.relay_na_err)}"><span class="dot ${up ? 'good' : 'bad'}"></span>${esc(r2().short)} relay${up ? '' : ' · unreachable'}</span>`;
   }
   $('#services').innerHTML = html;
 }
@@ -274,12 +280,12 @@ function renderKPIs() {
   const na = ov.relay_na, nt = na?.totals || {}, nsys = ov.na_system || {};
   // With two regions: totals across both, split underneath.
   const both = (k) => (r ? t[k] || 0 : 0) + (na ? nt[k] || 0 : 0);
-  const split = (k) => `India ${r ? fmtNum(t[k]) : '—'} · NA ${na ? fmtNum(nt[k]) : '—'}`;
+  const split = (k) => `India ${r ? fmtNum(t[k]) : '—'} · ${r2().short} ${na ? fmtNum(nt[k]) : '—'}`;
   const tiles = naOn() ? [
     kpi('Servers online', r || na ? fmtNum(both('tunnels')) : '—', split('tunnels')),
     kpi('Players now', r || na ? fmtNum(both('players')) : '—', split('players')),
     kpi('Relay traffic now', fmtRate((sys.relay_in || 0) + (sys.relay_out || 0) + (nsys.relay_in || 0) + (nsys.relay_out || 0)),
-      `India ${fmtRate((sys.relay_in || 0) + (sys.relay_out || 0))} · NA ${fmtRate((nsys.relay_in || 0) + (nsys.relay_out || 0))}`),
+      `India ${fmtRate((sys.relay_in || 0) + (sys.relay_out || 0))} · ${r2().short} ${fmtRate((nsys.relay_in || 0) + (nsys.relay_out || 0))}`),
   ] : [
     kpi('Servers online', r ? fmtNum(t.tunnels) : '—', r ? `${fmtNum(t.tunnels_served)} sessions since relay start` : 'Relay not reachable'),
     kpi('Players now', r ? fmtNum(t.players) : '—', r ? `${fmtNum(t.conns)} connections since start` : ''),
@@ -291,8 +297,8 @@ function renderKPIs() {
     kpi('Machine', `${(sys.cpu || 0).toFixed(0)}% CPU`, `RAM ${fmtBytes(sys.mem_used)} / ${fmtBytes(sys.mem_total)}${sys.temp_c ? ` · ${sys.temp_c.toFixed(0)}°C` : ''}`),
   );
   if (naOn()) {
-    tiles.push(kpi('AWS data out', ov.na_system ? `${fmtBytes(nsys.egress_month)}` : '—',
-      ov.na_system ? `${nsys.egress_month_name} · ${((nsys.egress_month || 0) / FREE_EGRESS * 100).toFixed(0)}% of the free tier` : 'NA machine not reachable'));
+    tiles.push(kpi(`${r2().short} data out`, ov.na_system ? `${fmtBytes(nsys.egress_month)}` : '—',
+      ov.na_system ? (r2().egress_free > 0 ? `${nsys.egress_month_name} · ${((nsys.egress_month || 0) / r2().egress_free * 100).toFixed(0)}% of the free allowance` : `${nsys.egress_month_name} · this month`) : `${r2().short} machine not reachable`));
   }
   $('#kpis').classList.toggle('seven', tiles.length === 7);
   $('#kpis').innerHTML = tiles.join('');
@@ -483,13 +489,14 @@ function renderNA() {
   sec.hidden = !naOn();
   if (!naOn()) return;
   const s = ov.na_system, el = $('#na-system');
-  $('#na-hostname').textContent = s?.hostname ? `${s.hostname} · AWS us-east-1` : 'AWS us-east-1';
-  if (!s) { el.innerHTML = `<div class="empty">Can't reach the NA machine: ${esc(ov.na_system_err || ov.relay_na_err)}</div>`; return; }
+  $('#na-title').textContent = `${r2().label} server`;
+  $('#na-hostname').textContent = s?.hostname ? `${s.hostname} · ${r2().provider}` : r2().provider;
+  if (!s) { el.innerHTML = `<div class="empty">Can't reach the ${esc(r2().label)} machine: ${esc(ov.na_system_err || ov.relay_na_err)}</div>`; return; }
   const memUsed = (s.mem_total || 0) - (s.mem_avail || 0);
   const diskUsed = (s.disk_total || 0) - (s.disk_free || 0);
   const egress = s.egress_month || 0;
   el.innerHTML = `<div class="sys-grid">
-    ${meter(`AWS data out · ${s.egress_month_name}`, egress, FREE_EGRESS, `${fmtBytes(egress)} of 100 GB free`)}
+    ${r2().egress_free > 0 ? meter(`Data out · ${s.egress_month_name}`, egress, r2().egress_free, `${fmtBytes(egress)} of ${fmtBytes(r2().egress_free)} free`) : `<div class="stat"><div class="l">Data out · ${esc(s.egress_month_name)}</div><div class="v num" style="font-size:17px">${fmtBytes(egress)}</div></div>`}
     ${meter('CPU', s.cpu || 0, 100, `${(s.cpu || 0).toFixed(0)}% of ${s.cores || '?'} cores`)}
     ${meter('Memory', memUsed, s.mem_total, `${fmtBytes(memUsed)} / ${fmtBytes(s.mem_total)}`)}
     ${meter('Disk /', diskUsed, s.disk_total, `${fmtBytes(diskUsed)} / ${fmtBytes(s.disk_total)}`)}
@@ -498,7 +505,7 @@ function renderNA() {
     <div class="stat"><div class="l">Internet now (down / up)</div><div class="v num" style="font-size:17px">${fmtRate(s.net_rx_rate)} / ${fmtRate(s.net_tx_rate)}</div></div>
     <div class="stat"><div class="l">Since boot (down / up)</div><div class="v num" style="font-size:17px">${fmtBytes(s.net_rx)} / ${fmtBytes(s.net_tx)}</div></div>
   </div>
-  <div class="muted">Data out is counted from this dashboard's samples (it misses time the dashboard was down). AWS charges about $0.09 per GB over 100 GB a month; check Billing for the exact figure.</div>`;
+  <div class="muted">Data out is counted from this dashboard's samples (it misses time the dashboard was down). Check your provider's billing for the exact figure.</div>`;
 }
 
 function renderModeration() {
@@ -571,6 +578,7 @@ function renderAll() {
   renderNames();
   renderSystem();
   renderNA();
+  { const nn = $('#nanet-title'); if (nn) nn.textContent = `${r2().short} internet`; const np = $('#nanet-provider'); if (np) np.textContent = '· ' + r2().provider.split(' ')[0]; }
   renderModeration();
   document.querySelectorAll('.na-only').forEach((e) => { e.hidden = !naOn(); });
 }
@@ -583,8 +591,8 @@ const EVENT_TEXT = {
   address_released: (e) => `Address released · ${e.name}`,
   service: (e) => `${e.service}: ${e.from} → ${e.to}`,
   admin_action: (e) => `You: ${e.action} ${e.id || e.name || ''}`,
-  relay_api_down: (e) => `${e.region === 'na' ? 'NA relay' : 'Relay'} operator API unreachable`,
-  relay_api_back: (e) => `${e.region === 'na' ? 'NA relay' : 'Relay'} operator API back`,
+  relay_api_down: (e) => `${e.region ? regionShort(e.region) + ' relay' : 'Relay'} operator API unreachable`,
+  relay_api_back: (e) => `${e.region ? regionShort(e.region) + ' relay' : 'Relay'} operator API back`,
   web_stats_down: () => 'Website stats unreachable',
   web_stats_back: () => 'Website stats back',
 };
@@ -597,7 +605,7 @@ async function loadSaved() {
   const s = d.sessions || [];
   $('#sessions').innerHTML = s.length
     ? `<thead><tr><th>Server</th><th>Ended</th><th class="r">Lasted</th><th class="r">Players</th><th class="r">Traffic</th></tr></thead><tbody>${s.map((x) => `<tr>
-        <td><b>${esc(x.title || x.address)}</b>${x.region === 'na' ? '<span class="tag region-na">NA</span>' : ''}${x.bedrock ? '<span class="tag">Bedrock</span>' : ''}<div class="muted mono">${esc(x.title ? x.address : 'id ' + x.id)}</div></td>
+        <td><b>${esc(x.title || x.address)}</b>${x.region ? tagFor(x.region) : ''}${x.bedrock ? '<span class="tag">Bedrock</span>' : ''}<div class="muted mono">${esc(x.title ? x.address : 'id ' + x.id)}</div></td>
         <td>${esc(new Date(x.end).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</td>
         <td class="r">${esc(fmtDur(x.duration_s))}</td>
         <td class="r num">${x.unique_players} <span class="muted">· peak ${x.peak_players}</span></td>
@@ -605,7 +613,7 @@ async function loadSaved() {
     : '<tr><td class="empty">Sessions appear here when a server goes offline.</td></tr>';
   const ev = d.events || [];
   $('#events').innerHTML = ev.length
-    ? `<tbody>${ev.map((e) => `<tr><td class="muted" style="white-space:nowrap">${esc(new Date(e.t).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</td><td>${esc((EVENT_TEXT[e.type] || (() => e.type))(e))}${e.region === 'na' && !/^relay_api/.test(e.type) ? ' <span class="tag region-na">NA</span>' : ''}</td></tr>`).join('')}</tbody>`
+    ? `<tbody>${ev.map((e) => `<tr><td class="muted" style="white-space:nowrap">${esc(new Date(e.t).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</td><td>${esc((EVENT_TEXT[e.type] || (() => e.type))(e))}${e.region && !/^relay_api/.test(e.type) ? ' ' + tagFor(e.region) : ''}</td></tr>`).join('')}</tbody>`
     : '<tr><td class="empty">Nothing has happened yet.</td></tr>';
 }
 
@@ -633,18 +641,18 @@ function chartDefs() {
   return [
     ['#ch-players', two ? [
       { label: 'Players · India', color: S1, get: (p) => z(p.players), fmt: n },
-      { label: 'Players · NA', color: S2, get: (p) => z(p.np), fmt: n },
+      { label: `Players · ${r2().short}`, color: S2, get: (p) => z(p.np), fmt: n },
     ] : [
       { label: 'Players', color: S1, get: (p) => p.players, fmt: n },
       { label: 'Servers', color: S2, get: (p) => p.tunnels, fmt: n },
     ], n, { minMax: 4 }],
     ['#ch-servers', [
       { label: 'Servers · India', color: S1, get: (p) => z(p.tunnels), fmt: n },
-      { label: 'Servers · NA', color: S2, get: (p) => z(p.nt), fmt: n },
+      { label: `Servers · ${r2().short}`, color: S2, get: (p) => z(p.nt), fmt: n },
     ], n, { minMax: 4 }],
     ['#ch-relay', two ? [
       { label: 'India relay', color: S1, get: (p) => z(p.rin) + z(p.rout), fmt: fmtRate },
-      { label: 'NA relay', color: S2, get: (p) => z(p.nin) + z(p.nout), fmt: fmtRate },
+      { label: `${r2().short} relay`, color: S2, get: (p) => z(p.nin) + z(p.nout), fmt: fmtRate },
     ] : [
       { label: 'Players → servers', color: S1, get: (p) => p.rin, fmt: fmtRate },
       { label: 'Servers → players', color: S2, get: (p) => p.rout, fmt: fmtRate },
@@ -655,11 +663,11 @@ function chartDefs() {
     ], fmtRate, {}],
     ['#ch-nanet', [
       { label: 'Download', color: S1, get: (p) => z(p.nrx), fmt: fmtRate },
-      { label: 'Upload (billed)', color: S2, get: (p) => z(p.ntx), fmt: fmtRate },
+      { label: 'Upload', color: S2, get: (p) => z(p.ntx), fmt: fmtRate },
     ], fmtRate, {}],
     ['#ch-cpu', two ? [
       { label: 'Home', color: S1, get: (p) => z(p.cpu), fmt: pct },
-      { label: 'NA', color: S2, get: (p) => z(p.ncpu), fmt: pct },
+      { label: r2().short, color: S2, get: (p) => z(p.ncpu), fmt: pct },
     ] : [{ label: 'CPU', color: BRAND, get: (p) => p.cpu, fmt: pct }], pct, { max: 100 }],
   ];
 }

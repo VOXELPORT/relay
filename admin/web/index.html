@@ -39,7 +39,7 @@
         <figure class="chart-card na-only" hidden><figcaption>Servers online</figcaption><div class="chart" id="ch-servers"></div></figure>
         <figure class="chart-card"><figcaption>Relay traffic</figcaption><div class="chart" id="ch-relay"></div></figure>
         <figure class="chart-card"><figcaption>Home internet <span class="muted" id="iface-name"></span></figcaption><div class="chart" id="ch-net"></div></figure>
-        <figure class="chart-card na-only" hidden><figcaption>NA internet <span class="muted">· AWS</span></figcaption><div class="chart" id="ch-nanet"></div></figure>
+        <figure class="chart-card na-only" hidden><figcaption><span id="nanet-title">NA internet</span> <span class="muted" id="nanet-provider">· AWS</span></figcaption><div class="chart" id="ch-nanet"></div></figure>
         <figure class="chart-card"><figcaption>CPU</figcaption><div class="chart" id="ch-cpu"></div></figure>
       </div>
     </section>
@@ -77,7 +77,7 @@
     </div>
 
     <section class="block" id="na-block" hidden>
-      <div class="block-head"><h2>North America server</h2><span class="muted" id="na-hostname"></span></div>
+      <div class="block-head"><h2 id="na-title">North America server</h2><span class="muted" id="na-hostname"></span></div>
       <div id="na-system"></div>
     </section>
 

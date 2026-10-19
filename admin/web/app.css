@@ -162,6 +162,7 @@ h3.sub { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 .tag.region-na { color: var(--series-2); border-color: var(--series-2); }
+.tag.region-eu { color: var(--series-2); border-color: var(--series-2); }
 .tag.region-in { color: var(--series-1); border-color: var(--series-1); }
 
 /* Search box in a block header (custom addresses) */
